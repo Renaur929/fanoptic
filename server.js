@@ -162,8 +162,8 @@ async function handler(req, res) {
     const outbox = await readJson(outboxFile, []);
     outbox.push({ to: email, name, subject: 'Welcome to FanOptic!', createdAt: new Date().toISOString(), message: welcomeMessage(name, pickCheer(user.teams)), updates: user.updates });
     await writeJson(outboxFile, outbox);
-    await sendWelcomeEmail({ to: email, name, teams: user.teams });
-    return send(res, 201, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token });
+    const emailStatus = await sendWelcomeEmail({ to: email, name, teams: user.teams });
+    return send(res, 201, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token, emailStatus });
   }
   if (req.method === 'POST' && url.pathname === '/api/login') {
     const b = await body(req), email = String(b.email || '').trim().toLowerCase(), user = await findUserByEmail(email);
