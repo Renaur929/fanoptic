@@ -27,7 +27,7 @@ async function initializeAccountStore(){
  for(const legacy of await readJson(usersFile,[])){const email=String(legacy.email||'').trim().toLowerCase();if(!legacy.id||!email||!legacy.passwordHash)continue;const group=groups.get(email)||[];group.push({...legacy,email});groups.set(email,group);}
  for(const group of groups.values()){
   group.sort((a,b)=>(Date.parse(a.createdAt||'')||0)-(Date.parse(b.createdAt||'')||0));
-  for(let i=0;i<group.length;i++){const user=group[i];await accountDb.query('INSERT INTO fanoptic_users(id,name,email,password_hash,updates,teams,is_active,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) ON CONFLICT DO NOTHING',[user.id,user.name,user.email,user.passwordHash,Boolean(user.updates),JSON.stringify(Array.isArray(user.teams)?user.teams:[]),i===group.length-1,user.createdAt||new Date().toISOString()]);}
+  for(let i=0;i<group.length;i++){const user=group[i];await accountDb.query('INSERT INTO fanoptic_users(id,name,email,password_hash,updates,teams,is_active,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) ON CONFLICT DO NOTHING',[user.id,user.name,user.email,user.passwordHash,Boolean(user.updates),JSON.stringify(Array.isArray(user.teams)?user.teams:[]),i===0,user.createdAt||new Date().toISOString()]);}
  }
  await accountDb.query('SELECT 1');
  console.log('Account storage connected to PostgreSQL.');
