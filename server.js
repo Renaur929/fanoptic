@@ -1,180 +1,77 @@
-
 import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-
-const root = process.cwd();
-const port = Number(process.env.PORT || 4173);
-const dataDir = path.join(root, 'data');
-const usersFile = path.join(dataDir, 'users.json');
-const outboxFile = path.join(dataDir, 'outbox.json');
-const sessions = new Map();
-const favorites = ['Denver Broncos', 'Denver Nuggets', 'Los Angeles Angels', 'Anaheim Ducks'];
-const teamLeague = { 'Denver Broncos': 'NFL', 'Denver Nuggets': 'NBA', 'Los Angeles Angels': 'MLB', 'Anaheim Ducks': 'NHL' };
-const fallback = {
-  'National Headlines': [['Sports news and live updates', 'ESPN', 'https://www.espn.com/'], ['Today’s top sports stories', 'CBS Sports', 'https://www.cbssports.com/']],
-  'Denver Broncos': [['Broncos team news and analysis', 'Mile High Report', 'https://www.milehighreport.com/denver-broncos-news/'], ['Broncos latest coverage', 'DenverBroncos.com', 'https://www.denverbroncos.com/news']],
-  'Denver Nuggets': [['Nuggets news and analysis', 'DNVR Sports', 'https://thednvr.com/nuggets/'], ['Nuggets latest coverage', 'NBA.com', 'https://www.nba.com/nuggets/news']],
-  'Los Angeles Angels': [['Angels news and analysis', 'MLB.com', 'https://www.mlb.com/angels/news'], ['Angels latest coverage', 'The Athletic', 'https://www.nytimes.com/athletic/mlb/team/angels/']],
-  'Anaheim Ducks': [['Ducks news and analysis', 'NHL.com', 'https://www.nhl.com/ducks/news'], ['Ducks latest coverage', 'The Athletic', 'https://www.nytimes.com/athletic/nhl/team/ducks/']]
-};
-
-async function readJson(file, fallbackValue) { try { return JSON.parse(await readFile(file, 'utf8')); } catch { return fallbackValue; } }
-async function writeJson(file, value) { await mkdir(dataDir, { recursive: true }); await writeFile(file, JSON.stringify(value, null, 2)); }
-function hash(password, salt = randomBytes(16).toString('hex')) { return salt + ':' + scryptSync(password, salt, 64).toString('hex'); }
-function matches(password, stored) { const [salt, hex] = String(stored).split(':'); if (!salt || !hex) return false; const a = Buffer.from(hex, 'hex'), b = scryptSync(password, salt, 64); return a.length === b.length && timingSafeEqual(a, b); }
-async function body(req) { let text = ''; for await (const chunk of req) text += chunk; return JSON.parse(text || '{}'); }
-function send(res, status, data, type = 'application/json') { res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'access-control-allow-origin': '*' }); res.end(type === 'application/json' ? JSON.stringify(data) : data); }
-
-const blockedArticleLanguage = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u;
-const blockedStreamPattern = /(?:free\s+(?:live\s+)?(?:stream|streaming|watch|match)|(?:live\s+)?(?:stream|streaming|watch)\s+free|full\s+(?:match|game)|\b(?:4k|1080p|720p)\b|illegal\s+stream)/i;
-function isAllowedArticle(item) { const text = [item.title, item.source, item.link].filter(Boolean).join(' '); return !blockedArticleLanguage.test(text) && !blockedStreamPattern.test(text); }
-function parseRss(xml, team, league) {
-  const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
-  return xml.split('<item>').slice(1).map(part => {
-    const b = part.split('</item>')[0];
-    const get = t => { const i = b.indexOf('<' + t); if (i < 0) return ''; const openEnd = b.indexOf('>', i), j = b.indexOf('</' + t + '>', openEnd); return openEnd < 0 || j < 0 ? '' : b.slice(openEnd + 1, j); };
-    return { team, league, title: strip(get('title')), link: strip(get('link')), source: strip(get('source')) || 'Publisher', author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')) };
-  }).filter(x => x.title && x.link && isAllowedArticle(x)).slice(0, 8);
+const root=process.cwd();
+const port=Number(process.env.PORT||4173);
+const dataDir=path.resolve(process.env.FANOPTIC_DATA_DIR||path.join(root,'data'));
+const usersFile=path.join(dataDir,'users.json');
+const outboxFile=path.join(dataDir,'outbox.json');
+const sessions=new Map();
+let accountDb=null;
+const favorites=['Denver Broncos','Denver Nuggets','Los Angeles Angels','Anaheim Ducks'];
+const teamLeague={'Denver Broncos':'NFL','Denver Nuggets':'NBA','Los Angeles Angels':'MLB','Anaheim Ducks':'NHL'};
+const fallback={'National Headlines':[['Sports news and live updates','ESPN','https://www.espn.com/'],['Today’s top sports stories','CBS Sports','https://www.cbssports.com/']],'Denver Broncos':[['Broncos team news and analysis','Mile High Report','https://www.milehighreport.com/denver-broncos-news/'],['Broncos latest coverage','DenverBroncos.com','https://www.denverbroncos.com/news']],'Denver Nuggets':[['Nuggets news and analysis','DNVR Sports','https://thednvr.com/nuggets/'],['Nuggets latest coverage','NBA.com','https://www.nba.com/nuggets/news']],'Los Angeles Angels':[['Angels news and analysis','MLB.com','https://www.mlb.com/angels/news'],['Angels latest coverage','The Athletic','https://www.nytimes.com/athletic/mlb/team/angels/']],'Anaheim Ducks':[['Ducks news and analysis','NHL.com','https://www.nhl.com/ducks/news'],['Ducks latest coverage','The Athletic','https://www.nytimes.com/athletic/nhl/team/ducks/']]};
+async function readJson(file,fallbackValue){try{return JSON.parse(await readFile(file,'utf8'));}catch{return fallbackValue;}}
+async function writeJson(file,value){await mkdir(dataDir,{recursive:true});await writeFile(file,JSON.stringify(value,null,2));}
+function userFromRow(row){return {id:row.id,name:row.name,email:row.email,passwordHash:row.password_hash,updates:row.updates,teams:row.teams,createdAt:new Date(row.created_at).toISOString()};}
+async function initializeAccountStore(){
+ if(!process.env.DATABASE_URL){console.warn('DATABASE_URL is not set; account storage is using the temporary JSON fallback.');return;}
+ const {Pool}=await import('pg');
+ accountDb=new Pool({connectionString:process.env.DATABASE_URL,max:5,connectionTimeoutMillis:10000,idleTimeoutMillis:30000});
+ await accountDb.query("CREATE TABLE IF NOT EXISTS fanoptic_users (id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL,password_hash TEXT NOT NULL,updates BOOLEAN NOT NULL DEFAULT FALSE,teams JSONB NOT NULL DEFAULT '[]'::jsonb,is_active BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+ await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE');
+ await accountDb.query('ALTER TABLE fanoptic_users DROP CONSTRAINT IF EXISTS fanoptic_users_email_key');
+ await accountDb.query('CREATE UNIQUE INDEX IF NOT EXISTS fanoptic_users_active_email_key ON fanoptic_users(email) WHERE is_active');
+ const groups=new Map();
+ for(const legacy of await readJson(usersFile,[])){const email=String(legacy.email||'').trim().toLowerCase();if(!legacy.id||!email||!legacy.passwordHash)continue;const group=groups.get(email)||[];group.push({...legacy,email});groups.set(email,group);}
+ for(const group of groups.values()){
+  group.sort((a,b)=>(Date.parse(a.createdAt||'')||0)-(Date.parse(b.createdAt||'')||0));
+  for(let i=0;i<group.length;i++){const user=group[i];await accountDb.query('INSERT INTO fanoptic_users(id,name,email,password_hash,updates,teams,is_active,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) ON CONFLICT DO NOTHING',[user.id,user.name,user.email,user.passwordHash,Boolean(user.updates),JSON.stringify(Array.isArray(user.teams)?user.teams:[]),i===group.length-1,user.createdAt||new Date().toISOString()]);}
+ }
+ await accountDb.query('SELECT 1');
+ console.log('Account storage connected to PostgreSQL.');
 }
-async function articlesFor(team) {
-  const league = teamLeague[team] || 'National', q = team === 'National Headlines' ? 'sports news' : team;
-  if (team === 'National Headlines') {
-    const queries = [['NFL', '49ers team news site:knbr.com'], ['NFL', 'Cowboys team news'], ['NFL', 'Chiefs team news'], ['NBA', 'Los Angeles Lakers basketball team news'], ['NBA', 'Golden State Warriors basketball team news'], ['NBA', 'Boston Celtics basketball team news'], ['MLB', 'Los Angeles Dodgers baseball team news'], ['MLB', 'New York Yankees baseball team news'], ['MLB', 'Chicago Cubs baseball team news'], ['NHL', 'Toronto Maple Leafs hockey team news'], ['NHL', 'Montreal Canadiens hockey team news'], ['NHL', 'New York Rangers hockey team news']];
-    const batches = await Promise.all(queries.map(async pair => { try { const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(pair[1] + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0]) : []; } catch { return []; } }));
-    const all = batches.flat(), seen = new Set(), varied = all.filter(a => { if (seen.has(a.source)) return false; seen.add(a.source); return true; }), rest = all.filter(a => !varied.includes(a));
-    varied.sort((a, b) => new Date(b.date) - new Date(a.date)); rest.sort((a, b) => new Date(b.date) - new Date(a.date));
-    const live = [...varied, ...rest].slice(0, 20);
-    return live.length ? live : (fallback[team] || []).map(x => ({ team, league, title: x[0], source: x[1], link: x[2], author: '', date: '' }));
-  }
-  try { const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(q + ' when:7d') + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) { const live = parseRss(await r.text(), team, league); if (live.length) return live; } } catch {}
-  return (fallback[team] || []).map(x => ({ team, league, title: x[0], source: x[1], link: x[2], author: '', date: '' }));
-}
-
-const scoreFeeds = { NFL: ['football', 'nfl'], NBA: ['basketball', 'nba'], MLB: ['baseball', 'mlb'], NHL: ['hockey', 'nhl'] };
-function ordinal(n) { const v = Number(n) || 0, mod10 = v % 10, mod100 = v % 100; return v + (mod10 === 1 && mod100 !== 11 ? 'ST' : mod10 === 2 && mod100 !== 12 ? 'ND' : mod10 === 3 && mod100 !== 13 ? 'RD' : 'TH'); }
-function normalizeScore(event, league) {
-  const competition = event.competitions?.[0] || {};
-  const teams = (competition.competitors || []).map(c => ({ name: c.team?.displayName || c.team?.name || c.name || 'Team', score: c.score ?? '', homeAway: c.homeAway }));
-  const away = teams.find(t => t.homeAway === 'away') || teams[0] || { name: 'Away', score: '' }, home = teams.find(t => t.homeAway === 'home') || teams[1] || { name: 'Home', score: '' };
-  const state = event.status?.type?.state || 'pre', detail = event.status?.type?.shortDetail || event.status?.type?.detail || '', period = Number(event.status?.period || 0), clock = event.status?.displayClock || '';
-  const date = event.date ? new Date(event.date) : new Date();
-  const day = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).toUpperCase();
-  const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' });
-  let phase = 'SCHEDULED';
-  if (state === 'post') phase = 'FINAL';
-  else if (state === 'in') {
-    if (league === 'MLB') { const inning = detail.match(/(Top|Bottom)\s+\d+(?:st|nd|rd|th)/i)?.[0]; phase = inning ? inning.toUpperCase() : (period ? ordinal(period) + ' INNING' : 'LIVE'); }
-    else if (league === 'NHL') phase = ordinal(period) + ' PERIOD' + (clock ? ' • ' + clock : '');
-    else if (league === 'NFL' || league === 'NBA') phase = ordinal(period) + ' QTR' + (clock ? ' • ' + clock : '');
-    else phase = 'LIVE';
-  }
-  return { favorite: favorites.includes(away.name) || favorites.includes(home.name), league, away: away.name, home: home.name, day, time, phase, awayScore: String(away.score || ''), homeScore: String(home.score || ''), updated: new Date().toISOString(), timestamp: date.getTime() };
-}
-async function liveScores() {
-  const batches = await Promise.all(Object.entries(scoreFeeds).map(async ([league, [sport, leagueKey]]) => {
-    const base = 'https://site.api.espn.com/apis/site/v2/sports/' + sport + '/' + leagueKey + '/scoreboard';
-    const dates = Array.from({ length: 8 }, (_, i) => { const d = new Date(Date.now() + i * 86400000); return d.toISOString().slice(0, 10).replaceAll('-', ''); });
-    const urls = [base + '?limit=100', ...dates.slice(1).map(day => base + '?dates=' + day + '&limit=100')];
-    const results = await Promise.all(urls.map(async url => { try { const r = await fetch(url); if (!r.ok) return []; const data = await r.json(); return (data.events || []).map(e => Object.assign(normalizeScore(e, league), { id: e.id })); } catch { return []; } }));
-    const seen = new Set(); return results.flat().filter(g => g.id && !seen.has(g.id) && (seen.add(g.id), true));
-  }));
-  const rank = g => g.phase === 'LIVE' ? 0 : g.phase === 'SCHEDULED' ? 1 : 2;
-  return batches.flat().sort((a, b) => rank(a) - rank(b) || Number(b.favorite) - Number(a.favorite) || Number(a.timestamp) - Number(b.timestamp));
+async function findUserByEmail(email){if(accountDb){const result=await accountDb.query('SELECT * FROM fanoptic_users WHERE email=$1 AND is_active=TRUE LIMIT 1',[email]);return result.rows[0]?userFromRow(result.rows[0]):null;}return(await readJson(usersFile,[])).find(user=>user.email===email)||null;}
+async function findUserById(id){if(accountDb){const result=await accountDb.query('SELECT * FROM fanoptic_users WHERE id=$1 AND is_active=TRUE LIMIT 1',[id]);return result.rows[0]?userFromRow(result.rows[0]):null;}return(await readJson(usersFile,[])).find(user=>user.id===id)||null;}
+async function saveUser(user){if(accountDb){try{await accountDb.query('INSERT INTO fanoptic_users(id,name,email,password_hash,updates,teams,is_active,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,TRUE,$7)',[user.id,user.name,user.email,user.passwordHash,user.updates,JSON.stringify(user.teams),user.createdAt]);return true;}catch(error){if(error.code==='23505')return false;throw error;}}const users=await readJson(usersFile,[]);if(users.some(item=>item.email===user.email))return false;users.push(user);await writeJson(usersFile,users);return true;}
+function hash(password,salt=randomBytes(16).toString('hex')){return salt+':'+scryptSync(password,salt,64).toString('hex');}
+function matches(password,stored){const parts=String(stored).split(':'),salt=parts[0],hex=parts[1];if(!salt||!hex)return false;const a=Buffer.from(hex,'hex'),b=scryptSync(password,salt,64);return a.length===b.length&&timingSafeEqual(a,b);}
+async function body(req){let text='';for await(const chunk of req)text+=chunk;return JSON.parse(text||'{}');}
+function send(res,status,data,type='application/json'){res.writeHead(status,{'content-type':type,'cache-control':'no-store','access-control-allow-origin':'*'});res.end(type==='application/json'?JSON.stringify(data):data);}
+function parseRss(xml,team,league){const strip=s=>String(s).replaceAll('<![CDATA[','').replaceAll(']]>','').trim();return xml.split('<item>').slice(1).map(part=>{const b=part.split('</item>')[0],get=t=>{const i=b.indexOf('<'+t);if(i<0)return '';const openEnd=b.indexOf('>',i);const j=b.indexOf('</'+t+'>',openEnd);return openEnd<0||j<0?'':b.slice(openEnd+1,j)};return{team,league,title:strip(get('title')),link:strip(get('link')),source:strip(get('source'))||'Publisher',author:strip(get('dc:creator')||get('author')||get('creator')),date:strip(get('pubDate'))}}).filter(x=>x.title&&x.link).slice(0,8);}
+async function articlesFor(team){const league=teamLeague[team]||'National',q=team==='National Headlines'?'sports news':team;if(team==='National Headlines'){const queries=[['NFL','49ers team news site:knbr.com'],['NFL','Cowboys team news'],['NFL','Chiefs team news'],['NBA','Los Angeles Lakers basketball team news'],['NBA','Golden State Warriors basketball team news'],['NBA','Boston Celtics basketball team news'],['MLB','Los Angeles Dodgers baseball team news'],['MLB','New York Yankees baseball team news'],['MLB','Chicago Cubs baseball team news'],['NHL','Toronto Maple Leafs hockey team news'],['NHL','Montreal Canadiens hockey team news'],['NHL','New York Rangers hockey team news']],batches=await Promise.all(queries.map(async pair=>{try{const r=await fetch('https://news.google.com/rss/search?q='+encodeURIComponent(pair[1]+' when:3d')+'&hl=en-US&gl=US&ceid=US:en');return r.ok?parseRss(await r.text(),'National Headlines',pair[0]):[];}catch{return[];}})),all=batches.flat(),seen=new Set(),varied=all.filter(a=>{if(seen.has(a.source))return false;seen.add(a.source);return true}),rest=all.filter(a=>!varied.includes(a));varied.sort((a,b)=>new Date(b.date)-new Date(a.date));rest.sort((a,b)=>new Date(b.date)-new Date(a.date));const live=[...varied,...rest].slice(0,20);return live.length?live:(fallback[team]||[]).map(x=>({team,league,title:x[0],source:x[1],link:x[2],author:'',date:''}));}try{const r=await fetch('https://news.google.com/rss/search?q='+encodeURIComponent(q+' when:7d')+'&hl=en-US&gl=US&ceid=US:en');if(r.ok){const live=parseRss(await r.text(),team,league);if(live.length)return live;}}catch{}return(fallback[team]||[]).map(x=>({team,league,title:x[0],source:x[1],link:x[2],author:'',date:''}));}const scoreFeeds={NFL:['football','nfl'],NBA:['basketball','nba'],MLB:['baseball','mlb'],NHL:['hockey','nhl']};
+function ordinal(n){const v=Number(n)||0,mod10=v%10,mod100=v%100;return v+(mod10===1&&mod100!==11?'ST':mod10===2&&mod100!==12?'ND':mod10===3&&mod100!==13?'RD':'TH');}
+function normalizeScore(event,league){const competition=event.competitions?.[0]||{},teams=(competition.competitors||[]).map(c=>({name:c.team?.displayName||c.team?.name||c.name||'Team',score:c.score??'',homeAway:c.homeAway})),away=teams.find(t=>t.homeAway==='away')||teams[0]||{name:'Away',score:''},home=teams.find(t=>t.homeAway==='home')||teams[1]||{name:'Home',score:''},state=event.status?.type?.state||'pre',detail=event.status?.type?.shortDetail||event.status?.type?.detail||'',period=Number(event.status?.period||0),clock=event.status?.displayClock||'',date=event.date?new Date(event.date):new Date(),day=date.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',timeZone:'America/New_York'}).toUpperCase(),time=date.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York',timeZoneName:'short'});let phase='SCHEDULED';if(state==='post')phase='FINAL';else if(state==='in'){if(league==='MLB'){const inning=detail.match(/(Top|Bottom)\s+\d+(?:st|nd|rd|th)/i)?.[0];phase=inning?inning.toUpperCase():(period?ordinal(period)+' INNING':'LIVE');}else if(league==='NHL')phase=ordinal(period)+' PERIOD'+(clock?' • '+clock:'');else if(league==='NFL'||league==='NBA')phase=ordinal(period)+' QTR'+(clock?' • '+clock:'');else phase='LIVE';}return{favorite:favorites.includes(away.name)||favorites.includes(home.name),league,away:away.name,home:home.name,day,time,phase,awayScore:String(away.score||''),homeScore:String(home.score||''),updated:new Date().toISOString(),timestamp:date.getTime()};}
+async function liveScores(){const batches=await Promise.all(Object.entries(scoreFeeds).map(async([league,[sport,leagueKey]])=>{const base='https://site.api.espn.com/apis/site/v2/sports/'+sport+'/'+leagueKey+'/scoreboard',dates=Array.from({length:8},(_,i)=>{const d=new Date(Date.now()+i*86400000);return d.toISOString().slice(0,10).replaceAll('-','');}),urls=[base+'?limit=100',...dates.slice(1).map(day=>base+'?dates='+day+'&limit=100')];const results=await Promise.all(urls.map(async url=>{try{const r=await fetch(url);if(!r.ok)return[];const data=await r.json();return(data.events||[]).map(e=>Object.assign(normalizeScore(e,league),{id:e.id}));}catch{return[];}}));const seen=new Set();return results.flat().filter(g=>g.id&&!seen.has(g.id)&&(seen.add(g.id),true));}));const rank=g=>g.phase==='LIVE'?0:g.phase==='SCHEDULED'?1:2;return batches.flat().sort((a,b)=>rank(a)-rank(b)||Number(b.favorite)-Number(a.favorite)||Number(a.timestamp)-Number(b.timestamp));}async function sendWelcomeEmail({to,name,teams}){
+ const key=process.env.RESEND_API_KEY,from=process.env.RESEND_FROM||process.env.EMAIL_FROM;
+ const cheer=(teams||[]).filter(t=>t!=='Las Vegas Raiders').sort(()=>Math.random()-.5)[0]||'sports';
+ const text=['Hi '+name+',','','Thank you for creating a FanOptic account!','','I created FanOptic out of frustration with not being able to stay constantly updated on my favorite teams. I wanted to build a place where fans can see only the news that matters to them.','','FanOptic is free to use and will remain that way. We are based in San Francisco, and I am grateful you signed up. I am excited for what is next.','','Go '+cheer+'!','','—Rene','Founder, FanOptic','San Francisco, CA.'].join('\n');
+ if(!key||!from)return{sent:false,queued:true};
+ try{const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'},body:JSON.stringify({from,to,subject:'Welcome to FanOptic!',text})});return{sent:response.ok,queued:!response.ok};}catch{return{sent:false,queued:true};}
 }
 
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
+async function handler(req,res){const url=new URL(req.url,'http://localhost');
+if(req.method==='POST'&&url.pathname==='/api/signup'){
+ const b=await body(req),name=String(b.name||'').trim(),email=String(b.email||'').trim().toLowerCase(),password=String(b.password||'');
+ if(!name||!email||password.length<8)return send(res,400,{error:'Name, email, and an 8-character password are required.'});
+ if(await findUserByEmail(email))return send(res,409,{error:'An account with that email already exists.'});
+ const user={id:randomBytes(16).toString('hex'),name,email,passwordHash:hash(password),updates:Boolean(b.updates),teams:Array.isArray(b.teams)&&b.teams.length?b.teams:favorites,createdAt:new Date().toISOString()};
+ if(!(await saveUser(user)))return send(res,409,{error:'An account with that email already exists.'});
+ const token=randomBytes(32).toString('hex');sessions.set(token,user.id);
+ let emailStatus;try{emailStatus=await sendWelcomeEmail({to:email,name,teams:user.teams});}catch{emailStatus={sent:false,queued:false};}
+ if(!emailStatus.sent&&!accountDb){const outbox=await readJson(outboxFile,[]);outbox.push({to:email,name,subject:'Welcome to FanOptic!',createdAt:new Date().toISOString(),updates:user.updates});await writeJson(outboxFile,outbox);emailStatus={sent:false,queued:true};}
+ else if(!emailStatus.sent)emailStatus={sent:false,queued:false};
+ return send(res,201,{user:{id:user.id,name:user.name,email:user.email,updates:user.updates,teams:user.teams},token,emailStatus});
 }
-function welcomeMessage(name, cheer) {
-  return `Hi ${name},\n\nWelcome to FanOptic, and thank you for joining.\n\nI started FanOptic because being a sports fan should not mean sorting through endless headlines. You should be able to open one place and quickly find the stories, reporters, and updates connected to the teams you care about.\n\nFanOptic is based in San Francisco and was created to make it easier for fans to stay close to their favorite teams. It is free to use, and it will stay that way.\n\nThank you for being part of FanOptic's growth. We are grateful you are here and excited for what is next.\n\nGo ${cheer}!\n\n—Rene\nFounder, FanOptic\nSan Francisco, CA`;
-}
-function pickCheer(teams) {
-  const allowed = (Array.isArray(teams) ? teams : []).filter(t => !['Las Vegas Raiders', 'Los Angeles Dodgers', 'Kansas City Chiefs', 'Los Angeles Chargers'].includes(t));
-  return allowed.length ? allowed[Math.floor(Math.random() * allowed.length)] : 'sports';
-}
-async function sendWelcomeEmail({ to, name, teams }) {
-  const key = process.env.RESEND_API_KEY;
-  const from = process.env.RESEND_FROM || 'FanOptic <onboarding@resend.dev>';
-  const cheer = pickCheer(teams);
-  const text = welcomeMessage(name, cheer);
-  const safeName = escapeHtml(name), safeCheer = escapeHtml(cheer);
-  const html = `
-    <div style="background:#f3ead7;padding:24px 16px;font-family:Arial,sans-serif;color:#10251d">
-      <div style="max-width:560px;margin:auto;border:3px solid #d7a84b;border-radius:8px;background:#10251d;overflow:hidden">
-        <div style="padding:26px 20px;text-align:center;color:#d7a84b;font:bold 34px Georgia,serif;letter-spacing:2px">FANOPTIC</div>
-        <div style="padding:26px 22px;background:#f3ead7;color:#10251d;line-height:1.6">
-          <p style="font-size:20px">Hi ${safeName},</p>
-          <p>Welcome to FanOptic, and thank you for joining.</p>
-          <p>I started FanOptic because being a sports fan should not mean sorting through endless headlines. You should be able to open one place and quickly find the stories, reporters, and updates connected to the teams you care about.</p>
-          <p>FanOptic is based in San Francisco and was created to make it easier for fans to stay close to their favorite teams. It is free to use, and it will stay that way.</p>
-          <p>Thank you for being part of FanOptic's growth. We are grateful you are here and excited for what is next.</p>
-          <p style="margin-top:22px;font-weight:bold;color:#9b7624">Go ${safeCheer}!</p>
-          <p>—Rene<br><strong>Founder, FanOptic</strong><br>San Francisco, CA</p>
-        </div>
-        <div style="padding:12px;text-align:center;background:#10251d;color:#a9997b;font-size:12px">Personalized sports coverage</div>
-      </div>
-    </div>`;
-  if (!key) return { sent: false, reason: 'RESEND_API_KEY not configured' };
-  try {
-    const r = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to, subject: 'Welcome to FanOptic!', text, html })
-    });
-    return { sent: r.ok, status: r.status };
-  } catch {
-    return { sent: false, reason: 'email provider request failed' };
-  }
-}
-
-async function handler(req, res) {
-  const url = new URL(req.url, 'http://localhost');
-  if (req.method === 'POST' && url.pathname === '/api/signup') {
-    const b = await body(req), name = String(b.name || '').trim(), email = String(b.email || '').trim().toLowerCase(), password = String(b.password || '');
-    if (!name || !email || password.length < 8) return send(res, 400, { error: 'Name, email, and an 8-character password are required.' });
-    const users = await readJson(usersFile, []);
-    if (users.some(u => u.email === email)) return send(res, 409, { error: 'An account with that email already exists.' });
-    const user = { id: randomBytes(16).toString('hex'), name, email, passwordHash: hash(password), updates: Boolean(b.updates), teams: Array.isArray(b.teams) && b.teams.length ? b.teams : favorites };
-    users.push(user); await writeJson(usersFile, users);
-    const token = randomBytes(32).toString('hex'); sessions.set(token, user.id);
-    const outbox = await readJson(outboxFile, []);
-    outbox.push({ to: email, name, subject: 'Welcome to FanOptic!', createdAt: new Date().toISOString(), message: welcomeMessage(name, pickCheer(user.teams)), updates: user.updates });
-    await writeJson(outboxFile, outbox);
-    await sendWelcomeEmail({ to: email, name, teams: user.teams });
-    return send(res, 201, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token });
-  }
-  if (req.method === 'POST' && url.pathname === '/api/login') {
-    const b = await body(req), email = String(b.email || '').trim().toLowerCase(), users = await readJson(usersFile, []), user = users.find(u => u.email === email);
-    if (!user || !matches(String(b.password || ''), user.passwordHash)) return send(res, 401, { error: 'Email or password is incorrect.' });
-    const token = randomBytes(32).toString('hex'); sessions.set(token, user.id);
-    return send(res, 200, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token });
-  }
-  if (req.method === 'GET' && url.pathname === '/api/me') {
-    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = sessions.get(token), users = await readJson(usersFile, []), user = users.find(u => u.id === id);
-    return send(res, user ? 200 : 401, user ? { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams } } : { error: 'Not signed in' });
-  }
-  if (req.method === 'GET' && url.pathname === '/api/articles') {
-    const teams = (url.searchParams.get('teams') || favorites.join(',')).split(',').map(x => x.trim()).filter(Boolean), articles = (await Promise.all(teams.map(articlesFor))).flat();
-    return send(res, 200, { updatedAt: new Date().toISOString(), articles });
-  }
-  if (req.method === 'GET' && url.pathname === '/api/scores') {
-    const games = await liveScores(); return send(res, 200, { updatedAt: new Date().toISOString(), source: 'ESPN', games });
-  }
-  if (req.method === 'POST' && url.pathname === '/api/analytics') {
-    const file = path.join(dataDir, 'analytics.json'), events = await readJson(file, []), b = await body(req);
-    events.push({ event: b.event || 'unknown', metadata: b.metadata || {}, createdAt: new Date().toISOString() }); await writeJson(file, events);
-    return send(res, 204, '', 'text/plain');
-  }
-  if (req.method === 'GET' && url.pathname === '/api/admin/analytics') {
-    if ((url.searchParams.get('key') || '') !== (process.env.ADMIN_KEY || 'fanoptic-dev')) return send(res, 401, { error: 'Unauthorized' });
-    const events = await readJson(path.join(dataDir, 'analytics.json'), []), count = e => events.filter(x => x.event === e).length;
-    return send(res, 200, { totalEvents: events.length, accountsCreated: count('account_created'), articleClicks: count('article_clicked'), searches: count('search_used'), recent: events.slice(-25).reverse() });
-  }
-  let file = url.pathname === '/' ? 'index.html' : url.pathname === '/admin' ? 'admin.html' : url.pathname.startsWith('/') ? url.pathname.slice(1) : url.pathname;
-  if (!file.includes('..')) { try { return send(res, 200, await readFile(path.join(root, 'public', file)), file.endsWith('.html') ? 'text/html' : 'text/plain'); } catch {} }
-  send(res, 404, { error: 'Not found' });
-}
-http.createServer((req, res) => handler(req, res).catch(() => send(res, 500, { error: 'Server error' }))).listen(port, () => console.log('FanOptic running on ' + port));
+if(req.method==='POST'&&url.pathname==='/api/login'){const b=await body(req),email=String(b.email||'').trim().toLowerCase(),user=await findUserByEmail(email);if(!user||!matches(String(b.password||''),user.passwordHash))return send(res,401,{error:'Email or password is incorrect.'});const token=randomBytes(32).toString('hex');sessions.set(token,user.id);return send(res,200,{user:{id:user.id,name:user.name,email:user.email,updates:user.updates,teams:user.teams},token});}
+if(req.method==='GET'&&url.pathname==='/api/me'){const auth=String(req.headers.authorization||''),token=auth.startsWith('Bearer ')?auth.slice(7):auth,id=sessions.get(token),user=id?await findUserById(id):null;return send(res,user?200:401,user?{user:{id:user.id,name:user.name,email:user.email,updates:user.updates,teams:user.teams}}:{error:'Not signed in'});}
+if(req.method==='GET'&&url.pathname==='/api/articles'){const teams=(url.searchParams.get('teams')||favorites.join(',')).split(',').map(x=>x.trim()).filter(Boolean),articles=(await Promise.all(teams.map(articlesFor))).flat();return send(res,200,{updatedAt:new Date().toISOString(),articles});}
+if(req.method==='GET'&&url.pathname==='/api/scores'){const games=await liveScores();return send(res,200,{updatedAt:new Date().toISOString(),source:'ESPN',games});}
+if(req.method==='POST'&&url.pathname==='/api/analytics'){const file=path.join(dataDir,'analytics.json'),events=await readJson(file,[]),b=await body(req);events.push({event:b.event||'unknown',metadata:b.metadata||{},createdAt:new Date().toISOString()});await writeJson(file,events);return send(res,204,'','text/plain');}
+if(req.method==='GET'&&url.pathname==='/api/admin/analytics'){if((url.searchParams.get('key')||'')!==(process.env.ADMIN_KEY||'fanoptic-dev'))return send(res,401,{error:'Unauthorized'});const events=await readJson(path.join(dataDir,'analytics.json'),[]),count=e=>events.filter(x=>x.event===e).length;return send(res,200,{totalEvents:events.length,accountsCreated:count('account_created'),articleClicks:count('article_clicked'),searches:count('search_used'),recent:events.slice(-25).reverse()});}
+let file=url.pathname==='/'?'index.html':url.pathname==='/admin'?'admin.html':url.pathname.startsWith('/')?url.pathname.slice(1):url.pathname;if(!file.includes('..')){try{return send(res,200,await readFile(path.join(root,'public',file)),file.endsWith('.html')?'text/html':'text/plain');}catch{}}
+send(res,404,{error:'Not found'});}
+await initializeAccountStore();
+http.createServer((req,res)=>handler(req,res).catch(()=>send(res,500,{error:'Server error'}))).listen(port,()=>console.log('FanOptic running on '+port));
 
