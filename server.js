@@ -19,22 +19,13 @@ async function initializeAccountStore(){
  if(!process.env.DATABASE_URL){console.warn('DATABASE_URL is not set; account storage is using the temporary JSON fallback.');return;}
  const {Pool}=await import('pg');
  accountDb=new Pool({connectionString:process.env.DATABASE_URL,max:5,connectionTimeoutMillis:10000,idleTimeoutMillis:30000});
- await accountDb.query("CREATE TABLE IF NOT EXISTS fanoptic_users (id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL,password_hash TEXT NOT NULL,updates BOOLEAN NOT NULL DEFAULT FALSE,teams JSONB NOT NULL DEFAULT '[]'::jsonb,is_active BOOLEAN NOT NULL DEFAULT TRUE,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
- await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE');
- await accountDb.query('ALTER TABLE fanoptic_users DROP CONSTRAINT IF EXISTS fanoptic_users_email_key');
- await accountDb.query('CREATE UNIQUE INDEX IF NOT EXISTS fanoptic_users_active_email_key ON fanoptic_users(email) WHERE is_active');
- const groups=new Map();
- for(const legacy of await readJson(usersFile,[])){const email=String(legacy.email||'').trim().toLowerCase();if(!legacy.id||!email||!legacy.passwordHash)continue;const group=groups.get(email)||[];group.push({...legacy,email});groups.set(email,group);}
- for(const group of groups.values()){
-  group.sort((a,b)=>(Date.parse(a.createdAt||'')||0)-(Date.parse(b.createdAt||'')||0));
-  for(let i=0;i<group.length;i++){const user=group[i];await accountDb.query('INSERT INTO fanoptic_users(id,name,email,password_hash,updates,teams,is_active,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8) ON CONFLICT DO NOTHING',[user.id,user.name,user.email,user.passwordHash,Boolean(user.updates),JSON.stringify(Array.isArray(user.teams)?user.teams:[]),i===0,user.createdAt||new Date().toISOString()]);}
- }
+ await accountDb.query("CREATE TABLE IF NOT EXISTS fanoptic_users (id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,password_hash TEXT NOT NULL,updates BOOLEAN NOT NULL DEFAULT FALSE,teams JSONB NOT NULL DEFAULT '[]'::jsonb,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
  await accountDb.query('SELECT 1');
  console.log('Account storage connected to PostgreSQL.');
 }
-async function findUserByEmail(email){if(accountDb){const result=await accountDb.query('SELECT * FROM fanoptic_users WHERE email=$1 AND is_active=TRUE LIMIT 1',[email]);return result.rows[0]?userFromRow(result.rows[0]):null;}return(await readJson(usersFile,[])).find(user=>user.email===email)||null;}
-async function findUserById(id){if(accountDb){const result=await accountDb.query('SELECT * FROM fanoptic_users WHERE id=$1 AND is_active=TRUE LIMIT 1',[id]);return result.rows[0]?userFromRow(result.rows[0]):null;}return(await readJson(usersFile,[])).find(user=>user.id===id)||null;}
-async function saveUser(user){if(accountDb){try{await accountDb.query('INSERT INTO fanoptic_users(id,name,email,password_hash,updates,teams,is_active,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,TRUE,$7)',[user.id,user.name,user.email,user.passwordHash,user.updates,JSON.stringify(user.teams),user.createdAt]);return true;}catch(error){if(error.code==='23505')return false;throw error;}}const users=await readJson(usersFile,[]);if(users.some(item=>item.email===user.email))return false;users.push(user);await writeJson(usersFile,users);return true;}
+async function findUserByEmail(email){if(accountDb){const result=await accountDb.query('SELECT * FROM fanoptic_users WHERE email=$1 LIMIT 1',[email]);return result.rows[0]?userFromRow(result.rows[0]):null;}return(await readJson(usersFile,[])).find(user=>user.email===email)||null;}
+async function findUserById(id){if(accountDb){const result=await accountDb.query('SELECT * FROM fanoptic_users WHERE id=$1 LIMIT 1',[id]);return result.rows[0]?userFromRow(result.rows[0]):null;}return(await readJson(usersFile,[])).find(user=>user.id===id)||null;}
+async function saveUser(user){if(accountDb){try{await accountDb.query('INSERT INTO fanoptic_users(id,name,email,password_hash,updates,teams,created_at) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)',[user.id,user.name,user.email,user.passwordHash,user.updates,JSON.stringify(user.teams),user.createdAt]);return true;}catch(error){if(error.code==='23505')return false;throw error;}}const users=await readJson(usersFile,[]);if(users.some(item=>item.email===user.email))return false;users.push(user);await writeJson(usersFile,users);return true;}
 function hash(password,salt=randomBytes(16).toString('hex')){return salt+':'+scryptSync(password,salt,64).toString('hex');}
 function matches(password,stored){const parts=String(stored).split(':'),salt=parts[0],hex=parts[1];if(!salt||!hex)return false;const a=Buffer.from(hex,'hex'),b=scryptSync(password,salt,64);return a.length===b.length&&timingSafeEqual(a,b);}
 async function body(req){let text='';for await(const chunk of req)text+=chunk;return JSON.parse(text||'{}');}
