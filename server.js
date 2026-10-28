@@ -10,6 +10,7 @@ const dataDir = path.join(root, 'data');
 const usersFile = path.join(dataDir, 'users.json');
 const outboxFile = path.join(dataDir, 'outbox.json');
 const sessions = new Map();
+let accountDb = null;
 const favorites = ['Denver Broncos', 'Denver Nuggets', 'Los Angeles Angels', 'Anaheim Ducks'];
 const teamLeague = { 'Denver Broncos': 'NFL', 'Denver Nuggets': 'NBA', 'Los Angeles Angels': 'MLB', 'Anaheim Ducks': 'NHL' };
 const fallback = {
@@ -22,6 +23,26 @@ const fallback = {
 
 async function readJson(file, fallbackValue) { try { return JSON.parse(await readFile(file, 'utf8')); } catch { return fallbackValue; } }
 async function writeJson(file, value) { await mkdir(dataDir, { recursive: true }); await writeFile(file, JSON.stringify(value, null, 2)); }
+function userFromRow(row) { return { id: row.id, name: row.name, email: row.email, passwordHash: row.password_hash, updates: row.updates, teams: row.teams, createdAt: new Date(row.created_at).toISOString() }; }
+async function initializeAccountStore() {
+  if (!process.env.DATABASE_URL) { console.warn('DATABASE_URL is not set; account storage is using the temporary JSON fallback.'); return; }
+  const { Pool } = await import('pg');
+  accountDb = new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000 });
+  await accountDb.query("CREATE TABLE IF NOT EXISTS fanoptic_users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, updates BOOLEAN NOT NULL DEFAULT FALSE, teams JSONB NOT NULL DEFAULT '[]'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+  await accountDb.query('SELECT 1');
+  console.log('Account storage connected to PostgreSQL.');
+}
+async function findUserByEmail(email) { if (accountDb) { const result = await accountDb.query('SELECT * FROM fanoptic_users WHERE email = $1 LIMIT 1', [email]); return result.rows[0] ? userFromRow(result.rows[0]) : null; } return (await readJson(usersFile, [])).find(user => user.email === email) || null; }
+async function findUserById(id) { if (accountDb) { const result = await accountDb.query('SELECT * FROM fanoptic_users WHERE id = $1 LIMIT 1', [id]); return result.rows[0] ? userFromRow(result.rows[0]) : null; } return (await readJson(usersFile, [])).find(user => user.id === id) || null; }
+async function saveUser(user) {
+  if (accountDb) {
+    try { await accountDb.query('INSERT INTO fanoptic_users (id, name, email, password_hash, updates, teams, created_at) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)', [user.id, user.name, user.email, user.passwordHash, user.updates, JSON.stringify(user.teams), user.createdAt]); return true; }
+    catch (error) { if (error.code === '23505') return false; throw error; }
+  }
+  const users = await readJson(usersFile, []);
+  if (users.some(item => item.email === user.email)) return false;
+  users.push(user); await writeJson(usersFile, users); return true;
+}
 function hash(password, salt = randomBytes(16).toString('hex')) { return salt + ':' + scryptSync(password, salt, 64).toString('hex'); }
 function matches(password, stored) { const [salt, hex] = String(stored).split(':'); if (!salt || !hex) return false; const a = Buffer.from(hex, 'hex'), b = scryptSync(password, salt, 64); return a.length === b.length && timingSafeEqual(a, b); }
 async function body(req) { let text = ''; for await (const chunk of req) text += chunk; return JSON.parse(text || '{}'); }
@@ -96,7 +117,7 @@ function pickCheer(teams) {
 }
 async function sendWelcomeEmail({ to, name, teams }) {
   const key = process.env.RESEND_API_KEY;
-  const from = process.env.RESEND_FROM || 'FanOptic <onboarding@resend.dev>';
+  const from = process.env.RESEND_FROM || process.env.EMAIL_FROM;
   const cheer = pickCheer(teams);
   const text = welcomeMessage(name, cheer);
   const safeName = escapeHtml(name), safeCheer = escapeHtml(cheer);
@@ -116,7 +137,7 @@ async function sendWelcomeEmail({ to, name, teams }) {
         <div style="padding:12px;text-align:center;background:#10251d;color:#a9997b;font-size:12px">Personalized sports coverage</div>
       </div>
     </div>`;
-  if (!key) return { sent: false, reason: 'RESEND_API_KEY not configured' };
+  if (!key || !from) return { sent: false, reason: 'Resend sender configuration is incomplete' };
   try {
     const r = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -134,25 +155,24 @@ async function handler(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/signup') {
     const b = await body(req), name = String(b.name || '').trim(), email = String(b.email || '').trim().toLowerCase(), password = String(b.password || '');
     if (!name || !email || password.length < 8) return send(res, 400, { error: 'Name, email, and an 8-character password are required.' });
-    const users = await readJson(usersFile, []);
-    if (users.some(u => u.email === email)) return send(res, 409, { error: 'An account with that email already exists.' });
-    const user = { id: randomBytes(16).toString('hex'), name, email, passwordHash: hash(password), updates: Boolean(b.updates), teams: Array.isArray(b.teams) && b.teams.length ? b.teams : favorites };
-    users.push(user); await writeJson(usersFile, users);
+    if (await findUserByEmail(email)) return send(res, 409, { error: 'An account with that email already exists.' });
+    const user = { id: randomBytes(16).toString('hex'), name, email, passwordHash: hash(password), updates: Boolean(b.updates), teams: Array.isArray(b.teams) && b.teams.length ? b.teams : favorites, createdAt: new Date().toISOString() };
+    if (!(await saveUser(user))) return send(res, 409, { error: 'An account with that email already exists.' });
     const token = randomBytes(32).toString('hex'); sessions.set(token, user.id);
     const outbox = await readJson(outboxFile, []);
     outbox.push({ to: email, name, subject: 'Welcome to FanOptic!', createdAt: new Date().toISOString(), message: welcomeMessage(name, pickCheer(user.teams)), updates: user.updates });
     await writeJson(outboxFile, outbox);
-    await sendWelcomeEmail({ to: email, name, teams: user.teams });
-    return send(res, 201, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token });
+    const emailStatus = await sendWelcomeEmail({ to: email, name, teams: user.teams });
+    return send(res, 201, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token, emailStatus });
   }
   if (req.method === 'POST' && url.pathname === '/api/login') {
-    const b = await body(req), email = String(b.email || '').trim().toLowerCase(), users = await readJson(usersFile, []), user = users.find(u => u.email === email);
+    const b = await body(req), email = String(b.email || '').trim().toLowerCase(), user = await findUserByEmail(email);
     if (!user || !matches(String(b.password || ''), user.passwordHash)) return send(res, 401, { error: 'Email or password is incorrect.' });
     const token = randomBytes(32).toString('hex'); sessions.set(token, user.id);
     return send(res, 200, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token });
   }
   if (req.method === 'GET' && url.pathname === '/api/me') {
-    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = sessions.get(token), users = await readJson(usersFile, []), user = users.find(u => u.id === id);
+    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = sessions.get(token), user = id ? await findUserById(id) : null;
     return send(res, user ? 200 : 401, user ? { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams } } : { error: 'Not signed in' });
   }
   if (req.method === 'GET' && url.pathname === '/api/articles') {
@@ -176,5 +196,5 @@ async function handler(req, res) {
   if (!file.includes('..')) { try { return send(res, 200, await readFile(path.join(root, 'public', file)), file.endsWith('.html') ? 'text/html' : 'text/plain'); } catch {} }
   send(res, 404, { error: 'Not found' });
 }
+await initializeAccountStore();
 http.createServer((req, res) => handler(req, res).catch(() => send(res, 500, { error: 'Server error' }))).listen(port, () => console.log('FanOptic running on ' + port));
-
