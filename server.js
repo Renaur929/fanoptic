@@ -1,8 +1,7 @@
-
 import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 4173);
@@ -11,6 +10,8 @@ const usersFile = path.join(dataDir, 'users.json');
 const outboxFile = path.join(dataDir, 'outbox.json');
 const sessions = new Map();
 let accountDb = null;
+const TERMS_VERSION = '2026-10-28';
+const VERIFICATION_TTL_MS = 10 * 60 * 1000;
 const favorites = ['Denver Broncos', 'Denver Nuggets', 'Los Angeles Angels', 'Anaheim Ducks'];
 const teamLeague = { 'Denver Broncos': 'NFL', 'Denver Nuggets': 'NBA', 'Los Angeles Angels': 'MLB', 'Anaheim Ducks': 'NHL' };
 const fallback = {
@@ -23,12 +24,18 @@ const fallback = {
 
 async function readJson(file, fallbackValue) { try { return JSON.parse(await readFile(file, 'utf8')); } catch { return fallbackValue; } }
 async function writeJson(file, value) { await mkdir(dataDir, { recursive: true }); await writeFile(file, JSON.stringify(value, null, 2)); }
-function userFromRow(row) { return { id: row.id, name: row.name, email: row.email, passwordHash: row.password_hash, updates: row.updates, teams: row.teams, createdAt: new Date(row.created_at).toISOString() }; }
+function userFromRow(row) { return { id: row.id, name: row.name, email: row.email, passwordHash: row.password_hash, updates: row.updates, teams: row.teams, createdAt: new Date(row.created_at).toISOString(), emailVerified: row.email_verified === true, verificationCodeHash: row.verification_code_hash, verificationExpiresAt: row.verification_expires_at ? new Date(row.verification_expires_at).toISOString() : null, verificationAttempts: Number(row.verification_attempts || 0), termsAcceptedAt: row.terms_accepted_at ? new Date(row.terms_accepted_at).toISOString() : null, termsVersion: row.terms_version || null }; }
 async function initializeAccountStore() {
   if (!process.env.DATABASE_URL) { console.warn('DATABASE_URL is not set; account storage is using the temporary JSON fallback.'); return; }
   const { Pool } = await import('pg');
   accountDb = new Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000 });
-  await accountDb.query("CREATE TABLE IF NOT EXISTS fanoptic_users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, updates BOOLEAN NOT NULL DEFAULT FALSE, teams JSONB NOT NULL DEFAULT '[]'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+  await accountDb.query("CREATE TABLE IF NOT EXISTS fanoptic_users (id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, updates BOOLEAN NOT NULL DEFAULT FALSE, teams JSONB NOT NULL DEFAULT '[]'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), email_verified BOOLEAN NOT NULL DEFAULT FALSE, verification_code_hash TEXT, verification_expires_at TIMESTAMPTZ, verification_attempts INTEGER NOT NULL DEFAULT 0, terms_accepted_at TIMESTAMPTZ, terms_version TEXT)");
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE');
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS verification_code_hash TEXT');
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS verification_expires_at TIMESTAMPTZ');
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS verification_attempts INTEGER NOT NULL DEFAULT 0');
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS terms_version TEXT');
   await accountDb.query('SELECT 1');
   console.log('Account storage connected to PostgreSQL.');
 }
@@ -36,13 +43,29 @@ async function findUserByEmail(email) { if (accountDb) { const result = await ac
 async function findUserById(id) { if (accountDb) { const result = await accountDb.query('SELECT * FROM fanoptic_users WHERE id = $1 LIMIT 1', [id]); return result.rows[0] ? userFromRow(result.rows[0]) : null; } return (await readJson(usersFile, [])).find(user => user.id === id) || null; }
 async function saveUser(user) {
   if (accountDb) {
-    try { await accountDb.query('INSERT INTO fanoptic_users (id, name, email, password_hash, updates, teams, created_at) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)', [user.id, user.name, user.email, user.passwordHash, user.updates, JSON.stringify(user.teams), user.createdAt]); return true; }
+    try { await accountDb.query('INSERT INTO fanoptic_users (id, name, email, password_hash, updates, teams, created_at, email_verified, verification_code_hash, verification_expires_at, verification_attempts, terms_accepted_at, terms_version) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10, $11, $12, $13)', [user.id, user.name, user.email, user.passwordHash, user.updates, JSON.stringify(user.teams), user.createdAt, user.emailVerified, user.verificationCodeHash, user.verificationExpiresAt, user.verificationAttempts, user.termsAcceptedAt, user.termsVersion]); return true; }
     catch (error) { if (error.code === '23505') return false; throw error; }
   }
   const users = await readJson(usersFile, []);
   if (users.some(item => item.email === user.email)) return false;
   users.push(user); await writeJson(usersFile, users); return true;
 }
+async function setPendingVerification(email, codeHash, expiresAt) {
+  if (accountDb) { await accountDb.query('UPDATE fanoptic_users SET email_verified = FALSE, verification_code_hash = $2, verification_expires_at = $3, verification_attempts = 0 WHERE email = $1', [email, codeHash, expiresAt]); return; }
+  const users = await readJson(usersFile, []), user = users.find(item => item.email === email); if (!user) return;
+  user.emailVerified = false; user.verificationCodeHash = codeHash; user.verificationExpiresAt = expiresAt; user.verificationAttempts = 0; await writeJson(usersFile, users);
+}
+async function addVerificationAttempt(email) {
+  if (accountDb) { await accountDb.query('UPDATE fanoptic_users SET verification_attempts = verification_attempts + 1 WHERE email = $1', [email]); return; }
+  const users = await readJson(usersFile, []), user = users.find(item => item.email === email); if (!user) return;
+  user.verificationAttempts = Number(user.verificationAttempts || 0) + 1; await writeJson(usersFile, users);
+}
+async function markEmailVerified(email) {
+  if (accountDb) { await accountDb.query('UPDATE fanoptic_users SET email_verified = TRUE, verification_code_hash = NULL, verification_expires_at = NULL, verification_attempts = 0 WHERE email = $1', [email]); return; }
+  const users = await readJson(usersFile, []), user = users.find(item => item.email === email); if (!user) return;
+  user.emailVerified = true; user.verificationCodeHash = null; user.verificationExpiresAt = null; user.verificationAttempts = 0; await writeJson(usersFile, users);
+}
+
 function hash(password, salt = randomBytes(16).toString('hex')) { return salt + ':' + scryptSync(password, salt, 64).toString('hex'); }
 function matches(password, stored) { const [salt, hex] = String(stored).split(':'); if (!salt || !hex) return false; const a = Buffer.from(hex, 'hex'), b = scryptSync(password, salt, 64); return a.length === b.length && timingSafeEqual(a, b); }
 async function body(req) { let text = ''; for await (const chunk of req) text += chunk; return JSON.parse(text || '{}'); }
@@ -115,59 +138,83 @@ function pickCheer(teams) {
   const allowed = (Array.isArray(teams) ? teams : []).filter(t => !['Las Vegas Raiders', 'Los Angeles Dodgers', 'Kansas City Chiefs', 'Los Angeles Chargers'].includes(t));
   return allowed.length ? allowed[Math.floor(Math.random() * allowed.length)] : 'sports';
 }
-async function sendWelcomeEmail({ to, name, teams }) {
+async function sendProviderEmail({ to, subject, text, html }) {
   const key = process.env.RESEND_API_KEY;
   const from = process.env.RESEND_FROM || process.env.EMAIL_FROM;
-  const cheer = pickCheer(teams);
-  const text = welcomeMessage(name, cheer);
-  const safeName = escapeHtml(name), safeCheer = escapeHtml(cheer);
-  const html = `
-    <div style="background:#f3ead7;padding:24px 16px;font-family:Arial,sans-serif;color:#10251d">
-      <div style="max-width:560px;margin:auto;border:3px solid #d7a84b;border-radius:8px;background:#10251d;overflow:hidden">
-        <div style="padding:26px 20px;text-align:center;color:#d7a84b;font:bold 34px Georgia,serif;letter-spacing:2px">FANOPTIC</div>
-        <div style="padding:26px 22px;background:#f3ead7;color:#10251d;line-height:1.6">
-          <p style="font-size:20px">Hi ${safeName},</p>
-          <p>Welcome to FanOptic, and thank you for joining.</p>
-          <p>I started FanOptic because being a sports fan should not mean sorting through endless headlines. You should be able to open one place and quickly find the stories, reporters, and updates connected to the teams you care about.</p>
-          <p>FanOptic is based in San Francisco and was created to make it easier for fans to stay close to their favorite teams. It is free to use, and it will stay that way.</p>
-          <p>Thank you for being part of FanOptic's growth. We are grateful you are here and excited for what is next.</p>
-          <p style="margin-top:22px;font-weight:bold;color:#9b7624">Go ${safeCheer}!</p>
-          <p>—Rene<br><strong>Founder, FanOptic</strong><br>San Francisco, CA</p>
-        </div>
-        <div style="padding:12px;text-align:center;background:#10251d;color:#a9997b;font-size:12px">Personalized sports coverage</div>
-      </div>
-    </div>`;
-  if (!key || !from) return { sent: false, reason: 'Resend sender configuration is incomplete' };
+  if (!key || !from) {
+    console.error('[email] sender configuration missing', { missing: !key ? 'RESEND_API_KEY' : 'RESEND_FROM' });
+    return { sent: false, reason: 'sender_configuration_missing' };
+  }
   try {
-    const r = await fetch('https://api.resend.com/emails', {
+    const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to, subject: 'Welcome to FanOptic!', text, html })
+      body: JSON.stringify({ from, to, subject, text, html })
     });
-    return { sent: r.ok, status: r.status };
-  } catch {
-    return { sent: false, reason: 'email provider request failed' };
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const code = String(data.name || data.code || 'provider_rejected').slice(0, 80);
+      console.error('[email] Resend rejected request', { status: response.status, code });
+      return { sent: false, status: response.status, reason: 'provider_rejected' };
+    }
+    console.log('[email] Resend accepted request', { status: response.status, id: data.id || null });
+    return { sent: true, status: response.status, id: data.id || null };
+  } catch (error) {
+    console.error('[email] provider request failed', { name: error?.name || 'Error' });
+    return { sent: false, reason: 'provider_request_failed' };
   }
+}
+async function sendVerificationEmail({ to, name, code }) {
+  const safeName = escapeHtml(name);
+  const text = 'Hi ' + name + ', your FanOptic verification code is ' + code + '. It expires in 10 minutes. If you did not request this, you can ignore this email. Terms: https://fanoptic-sportsdesk.com/terms.html Privacy: https://fanoptic-sportsdesk.com/privacy.html';
+  const html = '<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;color:#10251d"><h1 style="color:#9b7624">FANOPTIC</h1><p>Hi ' + safeName + ',</p><p>Enter this verification code to finish creating your account:</p><p style="font-size:28px;font-weight:bold;letter-spacing:7px">' + code + '</p><p>This code expires in 10 minutes. If you did not request it, ignore this email.</p><p><a href="https://fanoptic-sportsdesk.com/terms.html">Terms of Service</a> · <a href="https://fanoptic-sportsdesk.com/privacy.html">Privacy Policy</a></p></div>';
+  return sendProviderEmail({ to, subject: 'Your FanOptic verification code', text, html });
+}
+async function sendWelcomeEmail({ to, name, teams }) {
+  const cheer = pickCheer(teams), text = welcomeMessage(name, cheer), safeName = escapeHtml(name), safeCheer = escapeHtml(cheer);
+  const html = '<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;background:#f3ead7;color:#10251d"><h1 style="color:#9b7624">FANOPTIC</h1><p>Hi ' + safeName + ',</p><p>Welcome to FanOptic, and thank you for joining.</p><p>Your feed is ready to follow the teams you picked.</p><p>Go ' + safeCheer + '!</p><p>—Rene<br><strong>Founder, FanOptic</strong></p></div>';
+  return sendProviderEmail({ to, subject: 'Welcome to FanOptic!', text, html });
 }
 
 async function handler(req, res) {
   const url = new URL(req.url, 'http://localhost');
   if (req.method === 'POST' && url.pathname === '/api/signup') {
     const b = await body(req), name = String(b.name || '').trim(), email = String(b.email || '').trim().toLowerCase(), password = String(b.password || '');
-    if (!name || !email || password.length < 8) return send(res, 400, { error: 'Name, email, and an 8-character password are required.' });
+    if (!name || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8) return send(res, 400, { error: 'Enter a valid email, your name, and a password with at least 8 characters.' });
+    if (b.termsAccepted !== true) return send(res, 400, { error: 'Accept the Terms of Service and acknowledge the Privacy Policy to create an account.' });
     if (await findUserByEmail(email)) return send(res, 409, { error: 'An account with that email already exists.' });
-    const user = { id: randomBytes(16).toString('hex'), name, email, passwordHash: hash(password), updates: Boolean(b.updates), teams: Array.isArray(b.teams) && b.teams.length ? b.teams : favorites, createdAt: new Date().toISOString() };
+    const now = new Date(), code = String(randomInt(100000, 1000000)), expiresAt = new Date(now.getTime() + VERIFICATION_TTL_MS).toISOString();
+    const user = { id: randomBytes(16).toString('hex'), name, email, passwordHash: hash(password), updates: Boolean(b.updates), teams: Array.isArray(b.teams) && b.teams.length ? b.teams : favorites, createdAt: now.toISOString(), emailVerified: false, verificationCodeHash: hash('fanoptic-code:' + code), verificationExpiresAt: expiresAt, verificationAttempts: 0, termsAcceptedAt: now.toISOString(), termsVersion: TERMS_VERSION };
     if (!(await saveUser(user))) return send(res, 409, { error: 'An account with that email already exists.' });
-    const token = randomBytes(32).toString('hex'); sessions.set(token, user.id);
-    const outbox = await readJson(outboxFile, []);
-    outbox.push({ to: email, name, subject: 'Welcome to FanOptic!', createdAt: new Date().toISOString(), message: welcomeMessage(name, pickCheer(user.teams)), updates: user.updates });
-    await writeJson(outboxFile, outbox);
-    const emailStatus = await sendWelcomeEmail({ to: email, name, teams: user.teams });
-    return send(res, 201, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token, emailStatus });
+    const emailStatus = await sendVerificationEmail({ to: email, name, code });
+    return send(res, emailStatus.sent ? 201 : 503, { requiresVerification: true, emailStatus, error: emailStatus.sent ? undefined : 'Your signup is saved, but the verification email could not be sent. Check the message and use Resend code to try again.' });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/resend-verification') {
+    const b = await body(req), email = String(b.email || '').trim().toLowerCase(), password = String(b.password || ''), user = await findUserByEmail(email);
+    if (!user || user.emailVerified || !matches(password, user.passwordHash)) return send(res, 200, { ok: true });
+    const lastSentAt = user.verificationExpiresAt ? new Date(user.verificationExpiresAt).getTime() - VERIFICATION_TTL_MS : 0;
+    if (Date.now() - lastSentAt < 60000) return send(res, 429, { error: 'Wait one minute before requesting another code.' });
+    const code = String(randomInt(100000, 1000000)), expiresAt = new Date(Date.now() + VERIFICATION_TTL_MS).toISOString();
+    await setPendingVerification(email, hash('fanoptic-code:' + code), expiresAt);
+    const emailStatus = await sendVerificationEmail({ to: email, name: user.name, code });
+    return send(res, emailStatus.sent ? 200 : 503, emailStatus.sent ? { ok: true } : { error: 'The verification email could not be sent. Try again in a minute.', emailStatus });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/verify-email') {
+    const b = await body(req), email = String(b.email || '').trim().toLowerCase(), code = String(b.code || '').trim(), user = await findUserByEmail(email);
+    if (!/^\d{6}$/.test(code) || !user || user.emailVerified || !user.verificationCodeHash) return send(res, 400, { error: 'That code is invalid or expired. Request a new one and try again.' });
+    if (Number(user.verificationAttempts || 0) >= 5) return send(res, 429, { error: 'Too many attempts. Request a new code and try again.' });
+    if (!user.verificationExpiresAt || new Date(user.verificationExpiresAt).getTime() < Date.now()) return send(res, 400, { error: 'That code has expired. Request a new one and try again.' });
+    if (!matches('fanoptic-code:' + code, user.verificationCodeHash)) { await addVerificationAttempt(email); return send(res, 400, { error: 'That code is incorrect. Check it and try again.' }); }
+    await markEmailVerified(email);
+    const verifiedUser = await findUserByEmail(email), token = randomBytes(32).toString('hex');
+    sessions.set(token, verifiedUser.id);
+    const emailStatus = await sendWelcomeEmail({ to: verifiedUser.email, name: verifiedUser.name, teams: verifiedUser.teams });
+    return send(res, 200, { user: { id: verifiedUser.id, name: verifiedUser.name, email: verifiedUser.email, updates: verifiedUser.updates, teams: verifiedUser.teams }, token, emailStatus });
   }
   if (req.method === 'POST' && url.pathname === '/api/login') {
     const b = await body(req), email = String(b.email || '').trim().toLowerCase(), user = await findUserByEmail(email);
     if (!user || !matches(String(b.password || ''), user.passwordHash)) return send(res, 401, { error: 'Email or password is incorrect.' });
+    if (!user.emailVerified) return send(res, 403, { error: 'Verify your email before logging in.', requiresVerification: true });
     const token = randomBytes(32).toString('hex'); sessions.set(token, user.id);
     return send(res, 200, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token });
   }
