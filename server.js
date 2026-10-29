@@ -77,9 +77,8 @@ async function body(req) { let text = ''; for await (const chunk of req) text +=
 function send(res, status, data, type = 'application/json') { res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'access-control-allow-origin': '*' }); res.end(type === 'application/json' ? JSON.stringify(data) : data); }
 
 const blockedArticleLanguage = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u;
-const blockedStreamPattern = /\b(?:live\s*)?(?:stream(?:ing)?|tv\s+channel)\b|\b(?:watch|view)\s+(?:live|online|free)\b|\bfull\s+(?:match|game)\b|\b(?:4k|1080p|720p)\b|\billegal\s+stream\b/i;
-function normalizedArticleText(value) { return String(value || '').normalize('NFKC').toLowerCase().replace(/[\u200b-\u200f\ufeff]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
-function isAllowedArticle(item) { const original = [item.title, item.source, item.link].filter(Boolean).join(' '); const normalized = normalizedArticleText(original); const source = normalizedArticleText(item.source); return !blockedArticleLanguage.test(original) && !blockedStreamPattern.test(normalized) && !source.includes('vantage data centers'); }
+const blockedStreamPattern = /(?:free\s+(?:live\s+)?(?:stream|streaming|watch|match)|(?:live\s+)?(?:stream|streaming|watch)\s+free|full\s+(?:match|game)|\b(?:4k|1080p|720p)\b|illegal\s+stream)/i;
+function isAllowedArticle(item) { const text = [item.title, item.source, item.link].filter(Boolean).join(' '); return !blockedArticleLanguage.test(text) && !blockedStreamPattern.test(text); }
 function parseRss(xml, team, league) {
   const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
   const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
@@ -105,7 +104,7 @@ async function articlesFor(team) {
 
 const scoreFeeds = { NFL: ['football', 'nfl'], NBA: ['basketball', 'nba'], MLB: ['baseball', 'mlb'], NHL: ['hockey', 'nhl'] };
 function ordinal(n) { const v = Number(n) || 0, mod10 = v % 10, mod100 = v % 100; return v + (mod10 === 1 && mod100 !== 11 ? 'ST' : mod10 === 2 && mod100 !== 12 ? 'ND' : mod10 === 3 && mod100 !== 13 ? 'RD' : 'TH'); }
-function normalizeScore(event, league) {
+function normalizeScore(event, league, favoriteTeams = []) {
   const competition = event.competitions?.[0] || {};
   const teams = (competition.competitors || []).map(c => ({ name: c.team?.displayName || c.team?.name || c.name || 'Team', score: c.score ?? '', homeAway: c.homeAway }));
   const away = teams.find(t => t.homeAway === 'away') || teams[0] || { name: 'Away', score: '' }, home = teams.find(t => t.homeAway === 'home') || teams[1] || { name: 'Home', score: '' };
@@ -121,14 +120,14 @@ function normalizeScore(event, league) {
     else if (league === 'NFL' || league === 'NBA') phase = ordinal(period) + ' QTR' + (clock ? ' • ' + clock : '');
     else phase = 'LIVE';
   }
-  return { live: state === 'in', favorite: favorites.includes(away.name) || favorites.includes(home.name), league, away: away.name, home: home.name, day, time, phase, awayScore: String(away.score || ''), homeScore: String(home.score || ''), updated: new Date().toISOString(), timestamp: date.getTime() };
+  return { live: state === 'in', favorite: favoriteTeams.includes(away.name) || favoriteTeams.includes(home.name), league, away: away.name, home: home.name, day, time, phase, awayScore: String(away.score || ''), homeScore: String(home.score || ''), updated: new Date().toISOString(), timestamp: date.getTime() };
 }
-async function liveScores() {
+async function liveScores(favoriteTeams = []) {
   const batches = await Promise.all(Object.entries(scoreFeeds).map(async ([league, [sport, leagueKey]]) => {
     const base = 'https://site.api.espn.com/apis/site/v2/sports/' + sport + '/' + leagueKey + '/scoreboard';
     const dates = Array.from({ length: 8 }, (_, i) => { const d = new Date(Date.now() + i * 86400000); return d.toISOString().slice(0, 10).replaceAll('-', ''); });
     const urls = [base + '?limit=100', ...dates.slice(1).map(day => base + '?dates=' + day + '&limit=100')];
-    const results = await Promise.all(urls.map(async url => { try { const r = await fetch(url); if (!r.ok) return []; const data = await r.json(); return (data.events || []).map(e => Object.assign(normalizeScore(e, league), { id: e.id })); } catch { return []; } }));
+    const results = await Promise.all(urls.map(async url => { try { const r = await fetch(url); if (!r.ok) return []; const data = await r.json(); return (data.events || []).map(e => Object.assign(normalizeScore(e, league, favoriteTeams), { id: e.id })); } catch { return []; } }));
     const seen = new Set(); return results.flat().filter(g => g.id && !seen.has(g.id) && (seen.add(g.id), true));
   }));
   const rank = g => g.live ? 0 : g.phase === 'SCHEDULED' ? 1 : 2;
@@ -245,7 +244,8 @@ async function handler(req, res) {
     return send(res, 200, { updatedAt: new Date().toISOString(), articles });
   }
   if (req.method === 'GET' && url.pathname === '/api/scores') {
-    const games = await liveScores(); return send(res, 200, { updatedAt: new Date().toISOString(), source: 'ESPN', games });
+    const favoriteTeams = (url.searchParams.get('teams') || '').split(',').map(team => team.trim()).filter(Boolean);
+    const games = await liveScores(favoriteTeams); return send(res, 200, { updatedAt: new Date().toISOString(), source: 'ESPN', games });
   }
   if (req.method === 'POST' && url.pathname === '/api/analytics') {
     const file = path.join(dataDir, 'analytics.json'), events = await readJson(file, []), b = await body(req);
