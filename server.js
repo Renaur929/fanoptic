@@ -117,7 +117,7 @@ async function articlesFor(team) {
     varied.sort((a, b) => Date.parse(b.date) - Date.parse(a.date)); rest.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
     return [...varied, ...rest].slice(0, 20);
   }
-  try { const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(team + ' latest news when:3d') + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league); } catch {}
+  try { const sport = leagueSearchTerms[league] || ''; const query = [team, sport, 'team news'].filter(Boolean).join(' ') + ' when:3d'; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); } catch {}
   return [];
 }
 
