@@ -13,7 +13,12 @@ let accountDb = null;
 const TERMS_VERSION = '2026-10-28';
 const VERIFICATION_TTL_MS = 10 * 60 * 1000;
 const favorites = ['Denver Broncos', 'Denver Nuggets', 'Los Angeles Angels', 'Anaheim Ducks'];
-const teamLeague = { 'Denver Broncos': 'NFL', 'Denver Nuggets': 'NBA', 'Los Angeles Angels': 'MLB', 'Anaheim Ducks': 'NHL' };
+const teamLeague = Object.fromEntries(Object.entries({
+  NFL: 'Arizona Cardinals|Atlanta Falcons|Baltimore Ravens|Buffalo Bills|Carolina Panthers|Chicago Bears|Cincinnati Bengals|Cleveland Browns|Dallas Cowboys|Denver Broncos|Detroit Lions|Green Bay Packers|Houston Texans|Indianapolis Colts|Jacksonville Jaguars|Kansas City Chiefs|Las Vegas Raiders|Los Angeles Chargers|Los Angeles Rams|Miami Dolphins|Minnesota Vikings|New England Patriots|New Orleans Saints|New York Giants|New York Jets|Philadelphia Eagles|Pittsburgh Steelers|San Francisco 49ers|Seattle Seahawks|Tampa Bay Buccaneers|Tennessee Titans|Washington Commanders'.split('|'),
+  NBA: 'Atlanta Hawks|Boston Celtics|Brooklyn Nets|Charlotte Hornets|Chicago Bulls|Cleveland Cavaliers|Dallas Mavericks|Denver Nuggets|Detroit Pistons|Golden State Warriors|Houston Rockets|Indiana Pacers|Los Angeles Clippers|Los Angeles Lakers|Memphis Grizzlies|Miami Heat|Milwaukee Bucks|Minnesota Timberwolves|New Orleans Pelicans|New York Knicks|Oklahoma City Thunder|Orlando Magic|Philadelphia 76ers|Phoenix Suns|Portland Trail Blazers|Sacramento Kings|San Antonio Spurs|Toronto Raptors|Utah Jazz|Washington Wizards'.split('|'),
+  MLB: 'Arizona Diamondbacks|Atlanta Braves|Baltimore Orioles|Boston Red Sox|Chicago Cubs|Chicago White Sox|Cincinnati Reds|Cleveland Guardians|Colorado Rockies|Detroit Tigers|Houston Astros|Kansas City Royals|Los Angeles Angels|Los Angeles Dodgers|Miami Marlins|Milwaukee Brewers|Minnesota Twins|New York Mets|New York Yankees|Oakland Athletics|Philadelphia Phillies|Pittsburgh Pirates|San Diego Padres|San Francisco Giants|Seattle Mariners|St. Louis Cardinals|Tampa Bay Rays|Texas Rangers|Toronto Blue Jays|Washington Nationals'.split('|'),
+  NHL: 'Anaheim Ducks|Boston Bruins|Buffalo Sabres|Calgary Flames|Carolina Hurricanes|Chicago Blackhawks|Colorado Avalanche|Columbus Blue Jackets|Dallas Stars|Detroit Red Wings|Edmonton Oilers|Florida Panthers|Los Angeles Kings|Minnesota Wild|Montreal Canadiens|Nashville Predators|New Jersey Devils|New York Islanders|New York Rangers|Ottawa Senators|Philadelphia Flyers|Pittsburgh Penguins|San Jose Sharks|Seattle Kraken|St. Louis Blues|Tampa Bay Lightning|Toronto Maple Leafs|Utah Mammoth|Vancouver Canucks|Vegas Golden Knights|Washington Capitals|Winnipeg Jets'.split('|')
+}).flatMap(([league, teams]) => teams.map(team => [team, league])));
 const fallback = {
   'National Headlines': [['Sports news and live updates', 'ESPN', 'https://www.espn.com/'], ['Today’s top sports stories', 'CBS Sports', 'https://www.cbssports.com/']],
   'Denver Broncos': [['Broncos team news and analysis', 'Mile High Report', 'https://www.milehighreport.com/denver-broncos-news/'], ['Broncos latest coverage', 'DenverBroncos.com', 'https://www.denverbroncos.com/news']],
@@ -76,24 +81,25 @@ const blockedStreamPattern = /(?:free\s+(?:live\s+)?(?:stream|streaming|watch|ma
 function isAllowedArticle(item) { const text = [item.title, item.source, item.link].filter(Boolean).join(' '); return !blockedArticleLanguage.test(text) && !blockedStreamPattern.test(text); }
 function parseRss(xml, team, league) {
   const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
+  const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
   return xml.split('<item>').slice(1).map(part => {
     const b = part.split('</item>')[0];
     const get = t => { const i = b.indexOf('<' + t); if (i < 0) return ''; const openEnd = b.indexOf('>', i), j = b.indexOf('</' + t + '>', openEnd); return openEnd < 0 || j < 0 ? '' : b.slice(openEnd + 1, j); };
     return { team, league, title: strip(get('title')), link: strip(get('link')), source: strip(get('source')) || 'Publisher', author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')) };
-  }).filter(x => x.title && x.link && isAllowedArticle(x)).slice(0, 8);
+  }).filter(x => { const published = Date.parse(x.date); return x.title && x.link && Number.isFinite(published) && published <= Date.now() && published >= cutoff && isAllowedArticle(x); })
+    .sort((a, b) => Date.parse(b.date) - Date.parse(a.date)).slice(0, 8);
 }
 async function articlesFor(team) {
-  const league = teamLeague[team] || 'National', q = team === 'National Headlines' ? 'sports news' : team;
+  const league = teamLeague[team] || 'National';
   if (team === 'National Headlines') {
     const queries = [['NFL', '49ers team news site:knbr.com'], ['NFL', 'Cowboys team news'], ['NFL', 'Chiefs team news'], ['NBA', 'Los Angeles Lakers basketball team news'], ['NBA', 'Golden State Warriors basketball team news'], ['NBA', 'Boston Celtics basketball team news'], ['MLB', 'Los Angeles Dodgers baseball team news'], ['MLB', 'New York Yankees baseball team news'], ['MLB', 'Chicago Cubs baseball team news'], ['NHL', 'Toronto Maple Leafs hockey team news'], ['NHL', 'Montreal Canadiens hockey team news'], ['NHL', 'New York Rangers hockey team news']];
     const batches = await Promise.all(queries.map(async pair => { try { const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(pair[1] + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0]) : []; } catch { return []; } }));
     const all = batches.flat(), seen = new Set(), varied = all.filter(a => { if (seen.has(a.source)) return false; seen.add(a.source); return true; }), rest = all.filter(a => !varied.includes(a));
-    varied.sort((a, b) => new Date(b.date) - new Date(a.date)); rest.sort((a, b) => new Date(b.date) - new Date(a.date));
-    const live = [...varied, ...rest].slice(0, 20);
-    return live.length ? live : (fallback[team] || []).map(x => ({ team, league, title: x[0], source: x[1], link: x[2], author: '', date: '' }));
+    varied.sort((a, b) => Date.parse(b.date) - Date.parse(a.date)); rest.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
+    return [...varied, ...rest].slice(0, 20);
   }
-  try { const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(q + ' when:7d') + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) { const live = parseRss(await r.text(), team, league); if (live.length) return live; } } catch {}
-  return (fallback[team] || []).map(x => ({ team, league, title: x[0], source: x[1], link: x[2], author: '', date: '' }));
+  try { const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(team + ' latest news when:3d') + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league); } catch {}
+  return [];
 }
 
 const scoreFeeds = { NFL: ['football', 'nfl'], NBA: ['basketball', 'nba'], MLB: ['baseball', 'mlb'], NHL: ['hockey', 'nhl'] };
@@ -114,7 +120,7 @@ function normalizeScore(event, league) {
     else if (league === 'NFL' || league === 'NBA') phase = ordinal(period) + ' QTR' + (clock ? ' • ' + clock : '');
     else phase = 'LIVE';
   }
-  return { favorite: favorites.includes(away.name) || favorites.includes(home.name), league, away: away.name, home: home.name, day, time, phase, awayScore: String(away.score || ''), homeScore: String(home.score || ''), updated: new Date().toISOString(), timestamp: date.getTime() };
+  return { live: state === 'in', favorite: favorites.includes(away.name) || favorites.includes(home.name), league, away: away.name, home: home.name, day, time, phase, awayScore: String(away.score || ''), homeScore: String(home.score || ''), updated: new Date().toISOString(), timestamp: date.getTime() };
 }
 async function liveScores() {
   const batches = await Promise.all(Object.entries(scoreFeeds).map(async ([league, [sport, leagueKey]]) => {
@@ -124,7 +130,7 @@ async function liveScores() {
     const results = await Promise.all(urls.map(async url => { try { const r = await fetch(url); if (!r.ok) return []; const data = await r.json(); return (data.events || []).map(e => Object.assign(normalizeScore(e, league), { id: e.id })); } catch { return []; } }));
     const seen = new Set(); return results.flat().filter(g => g.id && !seen.has(g.id) && (seen.add(g.id), true));
   }));
-  const rank = g => g.phase === 'LIVE' ? 0 : g.phase === 'SCHEDULED' ? 1 : 2;
+  const rank = g => g.live ? 0 : g.phase === 'SCHEDULED' ? 1 : 2;
   return batches.flat().sort((a, b) => rank(a) - rank(b) || Number(b.favorite) - Number(a.favorite) || Number(a.timestamp) - Number(b.timestamp));
 }
 
