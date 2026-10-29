@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import { randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomInt, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 4173);
@@ -9,6 +9,9 @@ const dataDir = path.join(root, 'data');
 const usersFile = path.join(dataDir, 'users.json');
 const outboxFile = path.join(dataDir, 'outbox.json');
 const sessions = new Map();
+const resetRequests = new Map();
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 let accountDb = null;
 const TERMS_VERSION = '2026-10-28';
 const VERIFICATION_TTL_MS = 10 * 60 * 1000;
@@ -29,7 +32,13 @@ const fallback = {
 
 async function readJson(file, fallbackValue) { try { return JSON.parse(await readFile(file, 'utf8')); } catch { return fallbackValue; } }
 async function writeJson(file, value) { await mkdir(dataDir, { recursive: true }); await writeFile(file, JSON.stringify(value, null, 2)); }
-function userFromRow(row) { return { id: row.id, name: row.name, email: row.email, passwordHash: row.password_hash, updates: row.updates, teams: row.teams, createdAt: new Date(row.created_at).toISOString(), emailVerified: row.email_verified === true, verificationCodeHash: row.verification_code_hash, verificationExpiresAt: row.verification_expires_at ? new Date(row.verification_expires_at).toISOString() : null, verificationAttempts: Number(row.verification_attempts || 0), termsAcceptedAt: row.terms_accepted_at ? new Date(row.terms_accepted_at).toISOString() : null, termsVersion: row.terms_version || null }; }
+function userFromRow(row) { return { id: row.id, name: row.name, email: row.email, passwordHash: row.password_hash, updates: row.updates, teams: row.teams, createdAt: new Date(row.created_at).toISOString(), emailVerified: row.email_verified === true, verificationCodeHash: row.verification_code_hash, verificationExpiresAt: row.verification_expires_at ? new Date(row.verification_expires_at).toISOString() : null, verificationAttempts: Number(row.verification_attempts || 0), termsAcceptedAt: row.terms_accepted_at ? new Date(row.terms_accepted_at).toISOString() : null, termsVersion: row.terms_version || null, passwordResetTokenHash: row.password_reset_token_hash || null, passwordResetExpiresAt: row.password_reset_expires_at ? new Date(row.password_reset_expires_at).toISOString() : null }; }
+function publicUser(user) { return { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }; }
+function digestToken(token) { return createHash('sha256').update(String(token)).digest('hex'); }
+async function createSession(userId) { const token = randomBytes(32).toString('hex'), expires = new Date(Date.now() + SESSION_TTL_MS).toISOString(); if (accountDb) await accountDb.query('INSERT INTO fanoptic_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3) ON CONFLICT (token_hash) DO UPDATE SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at', [digestToken(token), userId, expires]); else sessions.set(token, userId); return token; }
+async function sessionUserId(token) { if (!token) return null; if (accountDb) { const result = await accountDb.query('SELECT user_id FROM fanoptic_sessions WHERE token_hash = $1 AND expires_at > NOW() LIMIT 1', [digestToken(token)]); return result.rows[0]?.user_id || null; } return sessions.get(token) || null; }
+async function revokeUserSessions(userId) { if (accountDb) await accountDb.query('DELETE FROM fanoptic_sessions WHERE user_id = $1', [userId]); for (const [token, id] of sessions) if (id === userId) sessions.delete(token); }
+async function revokeSession(token) { if (accountDb) await accountDb.query('DELETE FROM fanoptic_sessions WHERE token_hash = $1', [digestToken(token)]); else sessions.delete(token); }
 async function initializeAccountStore() {
   if (!process.env.DATABASE_URL) { console.warn('DATABASE_URL is not set; account storage is using the temporary JSON fallback.'); return; }
   const { Pool } = await import('pg');
@@ -41,6 +50,10 @@ async function initializeAccountStore() {
   await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS verification_attempts INTEGER NOT NULL DEFAULT 0');
   await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS terms_accepted_at TIMESTAMPTZ');
   await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS terms_version TEXT');
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS password_reset_token_hash TEXT');
+  await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ');
+  await accountDb.query('CREATE TABLE IF NOT EXISTS fanoptic_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES fanoptic_users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL)');
+  await accountDb.query('CREATE INDEX IF NOT EXISTS fanoptic_sessions_user_id_idx ON fanoptic_sessions(user_id)');
   await accountDb.query('SELECT 1');
   console.log('Account storage connected to PostgreSQL.');
 }
@@ -71,6 +84,11 @@ async function markEmailVerified(email) {
   user.emailVerified = true; user.verificationCodeHash = null; user.verificationExpiresAt = null; user.verificationAttempts = 0; await writeJson(usersFile, users);
 }
 
+async function updateUserRecord(id, patch) {
+  if (accountDb) { const fields = [], values = [id]; if (patch.name !== undefined) { values.push(patch.name); fields.push('name = $' + values.length); } if (patch.teams !== undefined) { values.push(JSON.stringify(patch.teams)); fields.push('teams = $' + values.length + '::jsonb'); } if (patch.passwordHash !== undefined) { values.push(patch.passwordHash); fields.push('password_hash = $' + values.length); } if (patch.passwordResetTokenHash !== undefined) { values.push(patch.passwordResetTokenHash); fields.push('password_reset_token_hash = $' + values.length); } if (patch.passwordResetExpiresAt !== undefined) { values.push(patch.passwordResetExpiresAt); fields.push('password_reset_expires_at = $' + values.length); } if (!fields.length) return; await accountDb.query('UPDATE fanoptic_users SET ' + fields.join(', ') + ' WHERE id = $1', values); return; }
+  const users = await readJson(usersFile, []), user = users.find(item => item.id === id); if (!user) return; Object.assign(user, patch); await writeJson(usersFile, users);
+}
+async function findUserByResetToken(token) { const tokenHash = digestToken(token); if (accountDb) { const result = await accountDb.query('SELECT * FROM fanoptic_users WHERE password_reset_token_hash = $1 AND password_reset_expires_at > NOW() LIMIT 1', [tokenHash]); return result.rows[0] ? userFromRow(result.rows[0]) : null; } return (await readJson(usersFile, [])).find(user => user.passwordResetTokenHash === tokenHash && user.passwordResetExpiresAt && new Date(user.passwordResetExpiresAt).getTime() > Date.now()) || null; }
 function hash(password, salt = randomBytes(16).toString('hex')) { return salt + ':' + scryptSync(password, salt, 64).toString('hex'); }
 function matches(password, stored) { const [salt, hex] = String(stored).split(':'); if (!salt || !hex) return false; const a = Buffer.from(hex, 'hex'), b = scryptSync(password, salt, 64); return a.length === b.length && timingSafeEqual(a, b); }
 async function body(req) { let text = ''; for await (const chunk of req) text += chunk; return JSON.parse(text || '{}'); }
@@ -177,6 +195,12 @@ async function sendVerificationEmail({ to, name, code }) {
   const html = '<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;color:#10251d"><h1 style="color:#9b7624">FANOPTIC</h1><p>Hi ' + safeName + ',</p><p>Enter this verification code to finish creating your account:</p><p style="font-size:28px;font-weight:bold;letter-spacing:7px">' + code + '</p><p>This code expires in 10 minutes. If you did not request it, ignore this email.</p><p><a href="https://fanoptic-sportsdesk.com/terms.html">Terms of Service</a> · <a href="https://fanoptic-sportsdesk.com/privacy.html">Privacy Policy</a></p></div>';
   return sendProviderEmail({ to, subject: 'Your FanOptic verification code', text, html });
 }
+async function sendPasswordResetEmail({ to, name, token }) {
+  const link = 'https://fanoptic-sportsdesk.com/reset-password.html?token=' + encodeURIComponent(token), safeName = escapeHtml(name), safeLink = escapeHtml(link);
+  const text = 'Hi ' + name + ', use this link to reset your FanOptic password: ' + link + '\n\nThe link expires in one hour. If you did not request a reset, you can ignore this email.';
+  const html = '<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;color:#10251d"><h1 style="color:#9b7624">FANOPTIC</h1><p>Hi ' + safeName + ',</p><p>Use this link to choose a new FanOptic password:</p><p><a style="display:inline-block;padding:12px 18px;background:#d7a84b;color:#182019;text-decoration:none;font-weight:bold" href="' + safeLink + '">Reset password</a></p><p>This link expires in one hour. If you did not request a reset, ignore this email.</p></div>';
+  return sendProviderEmail({ to, subject: 'Reset your FanOptic password', text, html });
+}
 async function sendWelcomeEmail({ to, name, teams }) {
   const cheer = pickCheer(teams), text = welcomeMessage(name, cheer), safeName = escapeHtml(name), safeCheer = escapeHtml(cheer);
   const html = '<!doctype html><html><body style="margin:0;padding:0;background-color:#f3ead7;">' +
@@ -225,20 +249,56 @@ async function handler(req, res) {
     if (!matches('fanoptic-code:' + code, user.verificationCodeHash)) { await addVerificationAttempt(email); return send(res, 400, { error: 'That code is incorrect. Check it and try again.' }); }
     await markEmailVerified(email);
     const verifiedUser = await findUserByEmail(email), token = randomBytes(32).toString('hex');
-    sessions.set(token, verifiedUser.id);
+    const sessionToken = await createSession(verifiedUser.id);
     const emailStatus = await sendWelcomeEmail({ to: verifiedUser.email, name: verifiedUser.name, teams: verifiedUser.teams });
-    return send(res, 200, { user: { id: verifiedUser.id, name: verifiedUser.name, email: verifiedUser.email, updates: verifiedUser.updates, teams: verifiedUser.teams }, token, emailStatus });
+    return send(res, 200, { user: publicUser(verifiedUser), token: sessionToken, emailStatus });
   }
   if (req.method === 'POST' && url.pathname === '/api/login') {
     const b = await body(req), email = String(b.email || '').trim().toLowerCase(), user = await findUserByEmail(email);
     if (!user || !matches(String(b.password || ''), user.passwordHash)) return send(res, 401, { error: 'Email or password is incorrect.' });
     if (!user.emailVerified) return send(res, 403, { error: 'Verify your email before logging in.', requiresVerification: true });
-    const token = randomBytes(32).toString('hex'); sessions.set(token, user.id);
-    return send(res, 200, { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams }, token });
+    const token = await createSession(user.id);
+    return send(res, 200, { user: publicUser(user), token });
   }
   if (req.method === 'GET' && url.pathname === '/api/me') {
-    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = sessions.get(token), user = id ? await findUserById(id) : null;
-    return send(res, user ? 200 : 401, user ? { user: { id: user.id, name: user.name, email: user.email, updates: user.updates, teams: user.teams } } : { error: 'Not signed in' });
+    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = await sessionUserId(token), user = id ? await findUserById(id) : null;
+    return send(res, user ? 200 : 401, user ? { user: publicUser(user) } : { error: 'Not signed in' });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/logout') { const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth; if (token) await revokeSession(token); return send(res, 200, { ok: true }); }
+  if (req.method === 'PATCH' && url.pathname === '/api/account') {
+    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = await sessionUserId(token), user = id ? await findUserById(id) : null;
+    if (!user) return send(res, 401, { error: 'Please log in again to manage your account.' });
+    const b = await body(req), name = String(b.name || '').trim(), teams = Array.isArray(b.teams) ? [...new Set(b.teams.filter(t => typeof t === 'string' && teamLeague[t]))] : null;
+    if (!name || name.length > 80 || !teams || !teams.length) return send(res, 400, { error: 'Enter a name and choose at least one valid team.' });
+    await updateUserRecord(id, { name, teams }); const updatedUser = await findUserById(id); return send(res, 200, { user: publicUser(updatedUser) });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/account/password') {
+    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = await sessionUserId(token), user = id ? await findUserById(id) : null;
+    if (!user) return send(res, 401, { error: 'Please log in again to manage your account.' });
+    const b = await body(req), currentPassword = String(b.currentPassword || ''), newPassword = String(b.newPassword || '');
+    if (!matches(currentPassword, user.passwordHash)) return send(res, 400, { error: 'Current password is incorrect.' });
+    if (newPassword.length < 8) return send(res, 400, { error: 'Your new password must be at least 8 characters.' });
+    await updateUserRecord(id, { passwordHash: hash(newPassword), passwordResetTokenHash: null, passwordResetExpiresAt: null }); return send(res, 200, { ok: true });
+  }
+  if (req.method === 'DELETE' && url.pathname === '/api/account') {
+    const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = await sessionUserId(token), user = id ? await findUserById(id) : null;
+    if (!user) return send(res, 401, { error: 'Please log in again to manage your account.' });
+    const b = await body(req); if (!matches(String(b.password || ''), user.passwordHash)) return send(res, 400, { error: 'Enter your current password to delete this account.' });
+    if (accountDb) await accountDb.query('DELETE FROM fanoptic_users WHERE id = $1', [id]); else { const users = await readJson(usersFile, []); await writeJson(usersFile, users.filter(item => item.id !== id)); }
+    await revokeUserSessions(id); return send(res, 200, { ok: true });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/password-reset/request') {
+    const b = await body(req), email = String(b.email || '').trim().toLowerCase(), last = resetRequests.get(email) || 0;
+    if (Date.now() - last < 60000) return send(res, 200, { ok: true }); resetRequests.set(email, Date.now());
+    const user = await findUserByEmail(email); if (user) { const token = randomBytes(32).toString('hex'), expires = new Date(Date.now() + PASSWORD_RESET_TTL_MS).toISOString(); await updateUserRecord(user.id, { passwordResetTokenHash: digestToken(token), passwordResetExpiresAt: expires }); const status = await sendPasswordResetEmail({ to: user.email, name: user.name, token }); if (!status.sent) console.error('[password-reset] email could not be sent'); }
+    return send(res, 200, { ok: true, message: 'If an account matches that email, a password reset link will be sent.' });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/password-reset/complete') {
+    const b = await body(req), token = String(b.token || ''), password = String(b.password || ''), user = token ? await findUserByResetToken(token) : null;
+    if (password.length < 8) return send(res, 400, { error: 'Your new password must be at least 8 characters.' });
+    if (!user) return send(res, 400, { error: 'This reset link is invalid or expired. Request another one.' });
+    await updateUserRecord(user.id, { passwordHash: hash(password), passwordResetTokenHash: null, passwordResetExpiresAt: null }); await revokeUserSessions(user.id);
+    return send(res, 200, { ok: true, message: 'Password updated. You can now log in.' });
   }
   if (req.method === 'GET' && url.pathname === '/api/articles') {
     const teams = (url.searchParams.get('teams') || favorites.join(',')).split(',').map(x => x.trim()).filter(Boolean), articles = (await Promise.all(teams.map(articlesFor))).flat();
