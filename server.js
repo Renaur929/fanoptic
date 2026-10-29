@@ -132,9 +132,9 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 function welcomeMessage(name, cheer) {
-  return `Hi ${name},\n\nWelcome to FanOptic, and thank you for joining.\n\nI started FanOptic because being a sports fan should not mean sorting through endless headlines. You should be able to open one place and quickly find the stories, reporters, and updates connected to the teams you care about.\n\nFanOptic is based in San Francisco and was created to make it easier for fans to stay close to their favorite teams. It is free to use, and it will stay that way.\n\nThank you for being part of FanOptic's growth. We are grateful you are here and excited for what is next.\n\nGo ${cheer}!\n\n—Rene\nFounder, FanOptic\nSan Francisco, CA`;
-}
-function pickCheer(teams) {
+  return `Hi ${name},\n\nWelcome to FanOptic, and thank you for joining. \n\nI started FanOptic because being a sports fan shouldn’t mean sorting through endless headlines. You should be able to open one place and quickly find the stories, reporters, and updates connected to the teams you care about. \n\nFanOptic is based in San Francisco and was created to make it easier for fans to stay close to their favorite teams. It’s free to use, and it will stay that way. \n\nThank you for being part of FanOptic’s growth. We’re grateful you’re here and excited for what’s next. \n\nGo ${cheer}! \n\n—Rene\n\nFounder, FanOptic\n\nSan Francisco, CA`;
+} function pickCheer(teams) {
+
   const allowed = (Array.isArray(teams) ? teams : []).filter(t => !['Las Vegas Raiders', 'Los Angeles Dodgers', 'Kansas City Chiefs', 'Los Angeles Chargers'].includes(t));
   return allowed.length ? allowed[Math.floor(Math.random() * allowed.length)] : 'sports';
 }
@@ -172,10 +172,21 @@ async function sendVerificationEmail({ to, name, code }) {
 }
 async function sendWelcomeEmail({ to, name, teams }) {
   const cheer = pickCheer(teams), text = welcomeMessage(name, cheer), safeName = escapeHtml(name), safeCheer = escapeHtml(cheer);
-  const html = '<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;background:#f3ead7;color:#10251d"><h1 style="color:#9b7624">FANOPTIC</h1><p>Hi ' + safeName + ',</p><p>Welcome to FanOptic, and thank you for joining.</p><p>Your feed is ready to follow the teams you picked.</p><p>Go ' + safeCheer + '!</p><p>—Rene<br><strong>Founder, FanOptic</strong></p></div>';
+  const html = '<!doctype html><html><body style="margin:0;padding:0;background-color:#f3ead7;">' +
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f3ead7;"><tr><td align="center" style="padding:32px 16px;">' +
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;background-color:#10251d;border:1px solid #d7a84b;border-radius:14px;">' +
+    '<tr><td style="padding:32px 36px 22px;border-bottom:1px solid #42634f;"><div style="font-family:Georgia,Times New Roman,serif;font-size:30px;font-weight:700;letter-spacing:5px;color:#d7a84b;">FANOPTIC</div><div style="margin-top:8px;font-family:Arial,sans-serif;font-size:11px;letter-spacing:2px;color:#d9dfd5;">PERSONALIZED SPORTS COVERAGE</div></td></tr>' +
+    '<tr><td style="padding:30px 36px 34px;font-family:Arial,sans-serif;font-size:16px;line-height:1.7;color:#f3ead7;">' +
+    '<p style="margin:0 0 18px;">Hi ' + safeName + ',</p>' +
+    '<p style="margin:0 0 18px;">Welcome to FanOptic, and thank you for joining.</p>' +
+    '<p style="margin:0 0 18px;">I started FanOptic because being a sports fan shouldn’t mean sorting through endless headlines. You should be able to open one place and quickly find the stories, reporters, and updates connected to the teams you care about.</p>' +
+    '<p style="margin:0 0 18px;">FanOptic is based in San Francisco and was created to make it easier for fans to stay close to their favorite teams. It’s free to use, and it will stay that way.</p>' +
+    '<p style="margin:0 0 22px;">Thank you for being part of FanOptic’s growth. We’re grateful you’re here and excited for what’s next.</p>' +
+    '<p style="margin:0 0 22px;">Go <strong style="color:#d7a84b;">' + safeCheer + '</strong>!</p>' +
+    '<p style="margin:0;">—Rene<br><strong>Founder, FanOptic</strong><br>San Francisco, CA</p></td></tr>' +
+    '<tr><td style="padding:16px 36px;border-top:1px solid #42634f;font-family:Arial,sans-serif;font-size:11px;letter-spacing:1px;color:#c4cec2;">FANOPTIC · PERSONALIZED SPORTS COVERAGE</td></tr></table></td></tr></table></body></html>';
   return sendProviderEmail({ to, subject: 'Welcome to FanOptic!', text, html });
 }
-
 async function handler(req, res) {
   const url = new URL(req.url, 'http://localhost');
   if (req.method === 'POST' && url.pathname === '/api/signup') {
