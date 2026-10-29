@@ -98,13 +98,13 @@ const blockedArticleLanguage = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\
 const blockedStreamPattern = /\b(?:live\s*)?(?:stream(?:ing)?|tv\s+channel)\b|\b(?:watch|view)\s+(?:live|online|free)\b|\bfull\s+(?:match|game)\b|\b(?:4k|1080p|720p)\b|\billegal\s+stream\b/i;
 function normalizedArticleText(value) { return String(value || '').normalize('NFKC').toLowerCase().replace(/[\u200b-\u200f\ufeff]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
 function isAllowedArticle(item) { const original = [item.title, item.source, item.link].filter(Boolean).join(' '); const normalized = normalizedArticleText(original); const source = normalizedArticleText(item.source); return !blockedArticleLanguage.test(original) && !blockedStreamPattern.test(normalized) && !source.includes('vantage data centers'); }
-function parseRss(xml, team, league) {
+function classifySourceName(value) { const s = normalizedArticleText(value); if (['mlb com','nba com','nfl com','nhl com','angels com','denver broncos com','chargers com','therams com'].some(x => s.includes(x))) return 'Official'; if (['orange county register','oc register','los angeles times','la times','denver post','mercury news','san francisco chronicle','knbr','new york post','tampa bay times','boston globe','seattle times','chicago tribune'].some(x => s.includes(x))) return 'Local / beat'; if (['sb nation','fansided','substack','blogspot','the hockey writers','mile high report','true blue la','halos heaven','anaheim calling','dnvr sports'].some(x => s.includes(x))) return 'Independent'; if (['espn','cbs sports','yahoo sports','associated press','ap news','usa today','fox sports','the athletic','sports illustrated','bleacher report'].some(x => s.includes(x))) return 'National'; return 'Other'; } function parseRss(xml, team, league) {
   const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
   const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
   return xml.split('<item>').slice(1).map(part => {
     const b = part.split('</item>')[0];
     const get = t => { const i = b.indexOf('<' + t); if (i < 0) return ''; const openEnd = b.indexOf('>', i), j = b.indexOf('</' + t + '>', openEnd); return openEnd < 0 || j < 0 ? '' : b.slice(openEnd + 1, j); };
-    return { team, league, title: strip(get('title')), link: strip(get('link')), source: strip(get('source')) || 'Publisher', author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')) };
+    return { team, league, title: strip(get('title')), link: strip(get('link')), source: strip(get('source')) || 'Publisher', sourceType: classifySourceName(strip(get('source')) || 'Publisher'), author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')) };
   }).filter(x => { const published = Date.parse(x.date); return x.title && x.link && Number.isFinite(published) && published <= Date.now() && published >= cutoff && isAllowedArticle(x); })
     .sort((a, b) => Date.parse(b.date) - Date.parse(a.date)).slice(0, 8);
 }
@@ -301,7 +301,7 @@ async function handler(req, res) {
     return send(res, 200, { ok: true, message: 'Password updated. You can now log in.' });
   }
   if (req.method === 'GET' && url.pathname === '/api/articles') {
-    const teams = (url.searchParams.get('teams') || favorites.join(',')).split(',').map(x => x.trim()).filter(Boolean), articles = (await Promise.all(teams.map(articlesFor))).flat();
+    const isDiscovery = url.searchParams.get('mode') === 'discover'; const teams = isDiscovery ? ['National Headlines'] : (url.searchParams.get('teams') || favorites.join(',')).split(',').map(x => x.trim()).filter(Boolean); const articles = (await Promise.all(teams.map(articlesFor))).flat();
     return send(res, 200, { updatedAt: new Date().toISOString(), articles });
   }
   if (req.method === 'GET' && url.pathname === '/api/scores') {
