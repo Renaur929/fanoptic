@@ -8,6 +8,7 @@ const port = Number(process.env.PORT || 4173);
 const dataDir = path.join(root, 'data');
 const usersFile = path.join(dataDir, 'users.json');
 const outboxFile = path.join(dataDir, 'outbox.json');
+const savedStoriesFile = path.join(dataDir, 'saved-stories.json');
 const sessions = new Map();
 const resetRequests = new Map();
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -39,6 +40,32 @@ async function createSession(userId) { const token = randomBytes(32).toString('h
 async function sessionUserId(token) { if (!token) return null; if (accountDb) { const result = await accountDb.query('SELECT user_id FROM fanoptic_sessions WHERE token_hash = $1 AND expires_at > NOW() LIMIT 1', [digestToken(token)]); return result.rows[0]?.user_id || null; } return sessions.get(token) || null; }
 async function revokeUserSessions(userId) { if (accountDb) await accountDb.query('DELETE FROM fanoptic_sessions WHERE user_id = $1', [userId]); for (const [token, id] of sessions) if (id === userId) sessions.delete(token); }
 async function revokeSession(token) { if (accountDb) await accountDb.query('DELETE FROM fanoptic_sessions WHERE token_hash = $1', [digestToken(token)]); else sessions.delete(token); }
+async function authenticatedUser(req) { const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = await sessionUserId(token); return id ? findUserById(id) : null; }
+function sanitizeSavedStory(input) {
+  if (!input || typeof input !== 'object') return null;
+  let link = '';
+  try { const url = new URL(String(input.link || '')); if (url.protocol !== 'https:') return null; link = url.toString(); } catch { return null; }
+  const field = (value, max) => String(value == null ? '' : value).slice(0, max);
+  const story = { link, title: field(input.title, 500), team: field(input.team, 120), league: field(input.league, 16), source: field(input.source, 120), sourceType: field(input.sourceType, 40), author: field(input.author, 120), date: field(input.date, 80), feedTypes: Array.isArray(input.feedTypes) ? input.feedTypes.filter(x => ['analysis', 'gameDay', 'rumors'].includes(x)).slice(0, 3) : [] };
+  return story.title ? story : null;
+}
+async function listSavedStories(userId) {
+  if (accountDb) { const result = await accountDb.query('SELECT article_data FROM fanoptic_saved_stories WHERE user_id = $1 ORDER BY saved_at DESC', [userId]); return result.rows.map(row => row.article_data); }
+  const saved = await readJson(savedStoriesFile, {}); return Array.isArray(saved[userId]) ? saved[userId] : [];
+}
+async function addSavedStory(userId, story) {
+  if (accountDb) { await accountDb.query('INSERT INTO fanoptic_saved_stories (user_id, article_url, article_data) VALUES ($1, $2, $3::jsonb) ON CONFLICT (user_id, article_url) DO UPDATE SET article_data = EXCLUDED.article_data, saved_at = NOW()', [userId, story.link, JSON.stringify(story)]); return; }
+  const saved = await readJson(savedStoriesFile, {}), items = Array.isArray(saved[userId]) ? saved[userId] : [];
+  saved[userId] = [story, ...items.filter(item => item.link !== story.link)]; await writeJson(savedStoriesFile, saved);
+}
+async function removeSavedStory(userId, link) {
+  if (accountDb) { await accountDb.query('DELETE FROM fanoptic_saved_stories WHERE user_id = $1 AND article_url = $2', [userId, link]); return; }
+  const saved = await readJson(savedStoriesFile, {}); saved[userId] = (Array.isArray(saved[userId]) ? saved[userId] : []).filter(item => item.link !== link); await writeJson(savedStoriesFile, saved);
+}
+async function deleteSavedStories(userId) {
+  if (accountDb) { await accountDb.query('DELETE FROM fanoptic_saved_stories WHERE user_id = $1', [userId]); return; }
+  const saved = await readJson(savedStoriesFile, {}); delete saved[userId]; await writeJson(savedStoriesFile, saved);
+}
 async function initializeAccountStore() {
   if (!process.env.DATABASE_URL) { console.warn('DATABASE_URL is not set; account storage is using the temporary JSON fallback.'); return; }
   const { Pool } = await import('pg');
@@ -54,6 +81,8 @@ async function initializeAccountStore() {
   await accountDb.query('ALTER TABLE fanoptic_users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ');
   await accountDb.query('CREATE TABLE IF NOT EXISTS fanoptic_sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES fanoptic_users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL)');
   await accountDb.query('CREATE INDEX IF NOT EXISTS fanoptic_sessions_user_id_idx ON fanoptic_sessions(user_id)');
+  await accountDb.query('CREATE TABLE IF NOT EXISTS fanoptic_saved_stories (user_id TEXT NOT NULL REFERENCES fanoptic_users(id) ON DELETE CASCADE, article_url TEXT NOT NULL, article_data JSONB NOT NULL, saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, article_url))');
+  await accountDb.query('CREATE INDEX IF NOT EXISTS fanoptic_saved_stories_user_saved_idx ON fanoptic_saved_stories(user_id, saved_at DESC)');
   await accountDb.query('SELECT 1');
   console.log('Account storage connected to PostgreSQL.');
 }
@@ -97,27 +126,49 @@ function send(res, status, data, type = 'application/json') { res.writeHead(stat
 const blockedArticleLanguage = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u;
 const blockedStreamPattern = /\b(?:live\s*)?(?:stream(?:ing)?|tv\s+channel)\b|\b(?:watch|view)\s+(?:live|online|free)\b|\bfull\s+(?:match|game)\b|\b(?:4k|1080p|720p)\b|\billegal\s+stream\b/i;
 function normalizedArticleText(value) { return String(value || '').normalize('NFKC').toLowerCase().replace(/[\u200b-\u200f\ufeff]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
-function isAllowedArticle(item) { const original = [item.title, item.source, item.link].filter(Boolean).join(' '); const normalized = normalizedArticleText(original); const source = normalizedArticleText(item.source); return !blockedArticleLanguage.test(original) && !blockedStreamPattern.test(normalized) && !source.includes('vantage data centers'); }
-function classifySourceName(value) { const s = normalizedArticleText(value); if (['mlb com','nba com','nfl com','nhl com','angels com','denver broncos com','chargers com','therams com'].some(x => s.includes(x))) return 'Official'; if (['orange county register','oc register','los angeles times','la times','denver post','mercury news','san francisco chronicle','knbr','new york post','tampa bay times','boston globe','seattle times','chicago tribune'].some(x => s.includes(x))) return 'Local / beat'; if (['sb nation','fansided','substack','blogspot','the hockey writers','mile high report','true blue la','halos heaven','anaheim calling','dnvr sports'].some(x => s.includes(x))) return 'Independent'; if (['espn','cbs sports','yahoo sports','associated press','ap news','usa today','fox sports','the athletic','sports illustrated','bleacher report'].some(x => s.includes(x))) return 'National'; return 'Other'; } function parseRss(xml, team, league) {
+function isAllowedArticle(item) { const original = [item.title, item.description, item.source, item.link].filter(Boolean).join(' '); const normalized = normalizedArticleText(original); const source = normalizedArticleText(item.source); return !blockedArticleLanguage.test(original) && !blockedStreamPattern.test(normalized) && !source.includes('vantage data centers'); }
+function classifySourceName(value) {
+  const source = normalizedArticleText(value);
+  const officialSites = ['mlb com', 'nba com', 'nfl com', 'nhl com', 'angels com', 'denver broncos com', 'denverbroncos com', 'chargers com', 'therams com', 'anaheimducks com', 'ducks com', 'nuggets com'];
+  const officialTeam = Object.keys(teamLeague).some(team => source.includes(normalizedArticleText(team)));
+  if (officialTeam || officialSites.some(name => source.includes(name))) return 'Team/League';
+  if (['orange county register', 'oc register', 'los angeles times', 'la times', 'denver post', 'mercury news', 'san francisco chronicle', 'knbr', 'new york post', 'tampa bay times', 'boston globe', 'seattle times', 'chicago tribune'].some(name => source.includes(name))) return 'Local/Beat';
+  if (['sb nation', 'fansided', 'substack', 'blogspot', 'the hockey writers', 'mile high report', 'true blue la', 'halos heaven', 'anaheim calling', 'dnvr sports'].some(name => source.includes(name))) return 'Independent';
+  if (['espn', 'cbs sports', 'yahoo sports', 'associated press', 'ap news', 'usa today', 'fox sports', 'the athletic', 'sports illustrated', 'bleacher report'].some(name => source.includes(name))) return 'National';
+  return 'Other';
+}
+function classifyArticleTypes(content) {
+  const text = normalizedArticleText(content), types = [];
+  if (/\b(analysis|analyst|opinion|breakdown|film room|scouting report|grades?|power rankings?|what we learned)\b/.test(text)) types.push('analysis');
+  if (/\b(preview|game day|live updates?|recap|postgame|post game|final score|box score|game notes|keys to the game|matchup preview)\b/.test(text)) types.push('gameDay');
+  const resolved = /\b(officially confirmed|confirmed by (?:the )?team|denied|report is false|not interested|trade completed|traded to|signs with|agrees to terms|deal is done)\b/.test(text);
+  if (!resolved && /\b(rumou?rs?|speculation|trade target|could be traded|may be traded|might be traded|linked to a trade|reported interest)\b/.test(text)) types.push('rumors');
+  return types;
+}
+function feedSearchPhrase(feedType) {
+  return ({ analysis: 'analysis OR breakdown OR opinion', gameDay: 'game preview OR live updates OR recap', rumors: 'trade rumor OR player rumor OR coaching rumor OR speculation' })[feedType] || 'team news';
+}
+function parseRss(xml, team, league) {
   const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
   const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
   return xml.split('<item>').slice(1).map(part => {
     const b = part.split('</item>')[0];
     const get = t => { const i = b.indexOf('<' + t); if (i < 0) return ''; const openEnd = b.indexOf('>', i), j = b.indexOf('</' + t + '>', openEnd); return openEnd < 0 || j < 0 ? '' : b.slice(openEnd + 1, j); };
-    return { team, league, title: strip(get('title')), link: strip(get('link')), source: strip(get('source')) || 'Publisher', sourceType: classifySourceName(strip(get('source')) || 'Publisher'), author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')) };
+    const title = strip(get('title')), description = strip(get('description'));
+    return { team, league, title, description, link: strip(get('link')), source: strip(get('source')) || 'Publisher', sourceType: classifySourceName(strip(get('source')) || 'Publisher'), author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')), feedTypes: classifyArticleTypes(title + ' ' + description) };
   }).filter(x => { const published = Date.parse(x.date); return x.title && x.link && Number.isFinite(published) && published <= Date.now() && published >= cutoff && isAllowedArticle(x); })
-    .sort((a, b) => Date.parse(b.date) - Date.parse(a.date)).slice(0, 8);
+    .sort((a, b) => Date.parse(b.date) - Date.parse(a.date)).slice(0, 20);
 }
-const leagueSearchTerms = { NFL: 'football NFL', NBA: 'basketball NBA', MLB: 'baseball MLB', NHL: 'hockey NHL' }; function articleMatchesTeam(item, team) { const text = normalizedArticleText([item.title, item.source].filter(Boolean).join(' ')); const nickname = team.split(' ').at(-1).toLowerCase(); const owners = Object.keys(teamLeague).filter(name => name.split(' ').at(-1).toLowerCase() === nickname); const aliases = [normalizedArticleText(team)]; if (owners.length === 1) aliases.push(normalizedArticleText(nickname)); if (!aliases.some(alias => (' ' + text + ' ').includes(' ' + alias + ' '))) return false; const league = teamLeague[team]; const wrongSport = { NFL: /\b(?:basketball|nba|baseball|mlb|hockey|nhl)\b/i, NBA: /\b(?:football|nfl|baseball|mlb|hockey|nhl)\b/i, MLB: /\b(?:football|nfl|basketball|nba|hockey|nhl)\b/i, NHL: /\b(?:football|nfl|basketball|nba|baseball|mlb)\b/i }; return item.league === league && !wrongSport[league]?.test(text); } async function articlesFor(team) {
+const leagueSearchTerms = { NFL: 'football NFL', NBA: 'basketball NBA', MLB: 'baseball MLB', NHL: 'hockey NHL' }; function articleMatchesTeam(item, team) { const text = normalizedArticleText([item.title, item.description, item.source].filter(Boolean).join(' ')); const nickname = team.split(' ').at(-1).toLowerCase(); const owners = Object.keys(teamLeague).filter(name => name.split(' ').at(-1).toLowerCase() === nickname); const aliases = [normalizedArticleText(team)]; if (owners.length === 1) aliases.push(normalizedArticleText(nickname)); if (!aliases.some(alias => (' ' + text + ' ').includes(' ' + alias + ' '))) return false; const league = teamLeague[team]; const wrongSport = { NFL: /\b(?:basketball|nba|baseball|mlb|hockey|nhl)\b/i, NBA: /\b(?:football|nfl|baseball|mlb|hockey|nhl)\b/i, MLB: /\b(?:football|nfl|basketball|nba|hockey|nhl)\b/i, NHL: /\b(?:football|nfl|basketball|nba|baseball|mlb)\b/i }; return item.league === league && !wrongSport[league]?.test(text); } async function articlesFor(team, feedType = 'latest') {
   const league = teamLeague[team] || 'National';
   if (team === 'National Headlines') {
     const queries = [['NFL', 'NFL football latest news teams coaches players'], ['NBA', 'NBA basketball latest news teams players'], ['MLB', 'MLB baseball latest news teams players'], ['NHL', 'NHL hockey latest news teams players']];
-    const batches = await Promise.all(queries.map(async pair => { try { const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(pair[1] + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0]) : []; } catch { return []; } }));
+    const batches = await Promise.all(queries.map(async pair => { try { const phrase = feedType === 'latest' ? pair[1] : pair[0] + ' ' + leagueSearchTerms[pair[0]] + ' ' + feedSearchPhrase(feedType); const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(phrase + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0]) : []; } catch { return []; } }));
     const all = batches.flat(), seen = new Set(), varied = all.filter(a => { if (seen.has(a.source)) return false; seen.add(a.source); return true; }), rest = all.filter(a => !varied.includes(a));
     varied.sort((a, b) => Date.parse(b.date) - Date.parse(a.date)); rest.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
     return [...varied, ...rest].slice(0, 20);
   }
-  try { const sport = leagueSearchTerms[league] || ''; const query = [team, sport, 'team news'].filter(Boolean).join(' ') + ' when:3d'; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); } catch {}
+  try { const sport = leagueSearchTerms[league] || ''; const query = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' ') + ' when:3d'; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); } catch {}
   return [];
 }
 
@@ -284,7 +335,7 @@ async function handler(req, res) {
     const auth = String(req.headers.authorization || ''), token = auth.startsWith('Bearer ') ? auth.slice(7) : auth, id = await sessionUserId(token), user = id ? await findUserById(id) : null;
     if (!user) return send(res, 401, { error: 'Please log in again to manage your account.' });
     const b = await body(req); if (!matches(String(b.password || ''), user.passwordHash)) return send(res, 400, { error: 'Enter your current password to delete this account.' });
-    if (accountDb) await accountDb.query('DELETE FROM fanoptic_users WHERE id = $1', [id]); else { const users = await readJson(usersFile, []); await writeJson(usersFile, users.filter(item => item.id !== id)); }
+    await deleteSavedStories(id); if (accountDb) await accountDb.query('DELETE FROM fanoptic_users WHERE id = $1', [id]); else { const users = await readJson(usersFile, []); await writeJson(usersFile, users.filter(item => item.id !== id)); }
     await revokeUserSessions(id); return send(res, 200, { ok: true });
   }
   if (req.method === 'POST' && url.pathname === '/api/password-reset/request') {
@@ -301,8 +352,21 @@ async function handler(req, res) {
     return send(res, 200, { ok: true, message: 'Password updated. You can now log in.' });
   }
   if (req.method === 'GET' && url.pathname === '/api/articles') {
-    const isDiscovery = url.searchParams.get('mode') === 'discover'; const teams = isDiscovery ? ['National Headlines'] : (url.searchParams.get('teams') || favorites.join(',')).split(',').map(x => x.trim()).filter(Boolean); const articles = (await Promise.all(teams.map(articlesFor))).flat();
+    const isDiscovery = url.searchParams.get('mode') === 'discover'; const requestedFeedType = url.searchParams.get('feedType'), feedType = ['latest', 'analysis', 'gameDay', 'rumors'].includes(requestedFeedType) ? requestedFeedType : 'latest';
+    // My Teams always comes from the signed-in account record, never from a client-supplied list or site-wide defaults.
+    const account = isDiscovery ? null : await authenticatedUser(req);
+    if (!isDiscovery && !account) return send(res, 401, { error: 'Log in to load your selected teams.' });
+    const teams = isDiscovery ? ['National Headlines'] : (Array.isArray(account.teams) ? account.teams.filter(team => teamLeague[team]) : []);
+    const articles = (await Promise.all(teams.map(team => articlesFor(team, feedType)))).flat();
     return send(res, 200, { updatedAt: new Date().toISOString(), articles });
+  }
+  if (url.pathname === '/api/saved-stories') {
+    const user = await authenticatedUser(req); if (!user) return send(res, 401, { error: 'Log in to sync saved stories across devices.' });
+    if (req.method === 'GET') return send(res, 200, { stories: await listSavedStories(user.id) });
+    const b = await body(req);
+    if (req.method === 'POST') { const story = sanitizeSavedStory(b); if (!story) return send(res, 400, { error: 'A valid story title and HTTPS link are required.' }); await addSavedStory(user.id, story); return send(res, 200, { ok: true, story }); }
+    if (req.method === 'DELETE') { const story = sanitizeSavedStory({ link: b.link, title: 'saved story' }); if (!story) return send(res, 400, { error: 'A valid HTTPS story link is required.' }); await removeSavedStory(user.id, story.link); return send(res, 200, { ok: true }); }
+    return send(res, 405, { error: 'Method not allowed.' });
   }
   if (req.method === 'GET' && url.pathname === '/api/scores') {
     const favoriteTeams = (url.searchParams.get('teams') || '').split(',').map(team => team.trim()).filter(Boolean);
@@ -319,7 +383,7 @@ async function handler(req, res) {
     return send(res, 200, { totalEvents: events.length, accountsCreated: count('account_created'), articleClicks: count('article_clicked'), searches: count('search_used'), recent: events.slice(-25).reverse() });
   }
   let file = url.pathname === '/' ? 'index.html' : url.pathname === '/admin' ? 'admin.html' : url.pathname.startsWith('/') ? url.pathname.slice(1) : url.pathname;
-  if (!file.includes('..')) { try { return send(res, 200, await readFile(path.join(root, 'public', file)), file.endsWith('.html') ? 'text/html' : 'text/plain'); } catch {} }
+  if (!file.includes('..')) { try { const contentType = file.endsWith('.html') ? 'text/html; charset=utf-8' : file.endsWith('.json') ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8'; return send(res, 200, await readFile(path.join(root, 'public', file)), contentType); } catch {} }
   send(res, 404, { error: 'Not found' });
 }
 await initializeAccountStore();
