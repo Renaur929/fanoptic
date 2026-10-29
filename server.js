@@ -127,19 +127,19 @@ function normalizeScore(event, league, favoriteTeams = []) {
   const competition = event.competitions?.[0] || {};
   const teams = (competition.competitors || []).map(c => ({ name: c.team?.displayName || c.team?.name || c.name || 'Team', score: c.score ?? '', homeAway: c.homeAway }));
   const away = teams.find(t => t.homeAway === 'away') || teams[0] || { name: 'Away', score: '' }, home = teams.find(t => t.homeAway === 'home') || teams[1] || { name: 'Home', score: '' };
-  const state = event.status?.type?.state || 'pre', detail = event.status?.type?.shortDetail || event.status?.type?.detail || '', period = Number(event.status?.period || 0), clock = event.status?.displayClock || '';
+  const state = event.status?.type?.state || 'pre', detail = event.status?.type?.shortDetail || event.status?.type?.detail || '', period = Number(event.status?.period || 0), currentPeriod = period || Number(detail.match(/\b(\d+)(?:st|nd|rd|th)\b/i)?.[1] || detail.match(/\bQ(?:TR|UARTER)?\s*(\d+)/i)?.[1] || 0), clock = event.status?.displayClock || detail.match(/\b\d{1,2}:\d{2}\b/)?.[0] || '';
   const date = event.date ? new Date(event.date) : new Date();
   const day = date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).toUpperCase();
   const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' });
   let phase = 'SCHEDULED';
   if (state === 'post') phase = 'FINAL';
   else if (state === 'in') {
-    if (league === 'MLB') { const inning = detail.match(/(Top|Bottom)\s+\d+(?:st|nd|rd|th)/i)?.[0]; phase = inning ? inning.toUpperCase() : (period ? ordinal(period) + ' INNING' : 'LIVE'); }
-    else if (league === 'NHL') phase = ordinal(period) + ' PERIOD' + (clock ? ' • ' + clock : '');
-    else if (league === 'NFL' || league === 'NBA') phase = ordinal(period) + ' QTR' + (clock ? ' • ' + clock : '');
+    if (league === 'MLB') { const inning = detail.match(/(Top|Bottom)\s+\d+(?:st|nd|rd|th)/i)?.[0]; phase = inning ? inning.toUpperCase() : (currentPeriod ? ordinal(currentPeriod) + ' INNING' : 'LIVE'); }
+    else if (league === 'NHL') phase = ordinal(currentPeriod) + ' PERIOD' + (clock ? ' • ' + clock : '');
+    else if (/halftime/i.test(detail)) phase = 'HALFTIME'; else if (league === 'NFL' || league === 'NBA') phase = (currentPeriod > 4 ? (currentPeriod === 5 ? 'OT' : (currentPeriod - 4) + 'OT') : (currentPeriod ? ordinal(currentPeriod) + ' QTR' : 'LIVE')) + (clock ? ' • ' + clock : '');
     else phase = 'LIVE';
   }
-  return { live: state === 'in', favorite: favoriteTeams.includes(away.name) || favoriteTeams.includes(home.name), league, away: away.name, home: home.name, day, time, phase, awayScore: String(away.score || ''), homeScore: String(home.score || ''), updated: new Date().toISOString(), timestamp: date.getTime() };
+  return { live: state === 'in', favorite: favoriteTeams.includes(away.name) || favoriteTeams.includes(home.name), league, away: away.name, home: home.name, day, time, phase, periodLabel: state === 'in' ? phase.split(' • ')[0] : '', clock: state === 'in' ? phase.split(' • ')[1] || '' : '', clockRunning: state === 'in' && event.status?.clock !== false && Boolean(clock) && !/halftime/i.test(detail), awayScore: String(away.score || ''), homeScore: String(home.score || ''), updated: new Date().toISOString(), timestamp: date.getTime() };
 }
 async function liveScores(favoriteTeams = []) {
   const batches = await Promise.all(Object.entries(scoreFeeds).map(async ([league, [sport, leagueKey]]) => {
