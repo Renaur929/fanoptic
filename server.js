@@ -149,8 +149,8 @@ async function liveScores(favoriteTeams = []) {
     const results = await Promise.all(urls.map(async url => { try { const r = await fetch(url); if (!r.ok) return []; const data = await r.json(); return (data.events || []).map(e => Object.assign(normalizeScore(e, league, favoriteTeams), { id: e.id })); } catch { return []; } }));
     const seen = new Set(); return results.flat().filter(g => g.id && !seen.has(g.id) && (seen.add(g.id), true));
   }));
-  const rank = g => g.live ? 0 : g.phase === 'SCHEDULED' ? 1 : 2;
-  return batches.flat().sort((a, b) => rank(a) - rank(b) || Number(b.favorite) - Number(a.favorite) || Number(a.timestamp) - Number(b.timestamp));
+  const rank = g => g.favorite ? (g.live ? 0 : g.phase === 'SCHEDULED' ? 1 : 4) : (g.live ? 2 : g.phase === 'SCHEDULED' ? 3 : 5);
+  return batches.flat().sort((a, b) => rank(a) - rank(b) || Number(a.timestamp) - Number(b.timestamp));
 }
 
 function escapeHtml(value) {
