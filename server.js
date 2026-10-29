@@ -77,8 +77,9 @@ async function body(req) { let text = ''; for await (const chunk of req) text +=
 function send(res, status, data, type = 'application/json') { res.writeHead(status, { 'content-type': type, 'cache-control': 'no-store', 'access-control-allow-origin': '*' }); res.end(type === 'application/json' ? JSON.stringify(data) : data); }
 
 const blockedArticleLanguage = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/u;
-const blockedStreamPattern = /(?:free\s+(?:live\s+)?(?:stream|streaming|watch|match)|(?:live\s+)?(?:stream|streaming|watch)\s+free|full\s+(?:match|game)|\b(?:4k|1080p|720p)\b|illegal\s+stream)/i;
-function isAllowedArticle(item) { const text = [item.title, item.source, item.link].filter(Boolean).join(' '); return !blockedArticleLanguage.test(text) && !blockedStreamPattern.test(text); }
+const blockedStreamPattern = /\b(?:live\s*)?(?:stream(?:ing)?|tv\s+channel)\b|\b(?:watch|view)\s+(?:live|online|free)\b|\bfull\s+(?:match|game)\b|\b(?:4k|1080p|720p)\b|\billegal\s+stream\b/i;
+function normalizedArticleText(value) { return String(value || '').normalize('NFKC').toLowerCase().replace(/[\u200b-\u200f\ufeff]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(); }
+function isAllowedArticle(item) { const original = [item.title, item.source, item.link].filter(Boolean).join(' '); const normalized = normalizedArticleText(original); const source = normalizedArticleText(item.source); return !blockedArticleLanguage.test(original) && !blockedStreamPattern.test(normalized) && !source.includes('vantage data centers'); }
 function parseRss(xml, team, league) {
   const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
   const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
