@@ -11,7 +11,7 @@ Rumor items are excluded when the headline or description indicates the report h
 
 ## Source filter
 
-The Sources dropdown is independent of Feed mode. It filters articles by the publisher classification: National, Local/Beat, Independent, Team/League, or All sources. The publisher classifier is maintained in server.js; unrecognized publishers remain available under All sources.
+The Sources dropdown is independent of Feed mode. It filters articles by the publisher classification: National, Local/Beat, Independent, Team/League, or All sources. The Independent Writers selection also asks the live search for coverage from independent sports publishers, then applies the normal team and sport checks. The independent publisher list and classifier are maintained in server.js; unrecognized publishers remain available under All sources.
 
 ## Team scope and Discovery
 
@@ -19,7 +19,7 @@ My Teams requests articles for the signed-in account's selected teams. The serve
 
 ## Writer profiles
 
-Top 3 profiles are shown only when Local/Beat Writers or Independent Writers is selected under Sources. They are hidden in Rumors and Saved views. Add real, reviewed profiles to public/featured-writers.json using the shape and criteria in FEATURED_WRITERS.md.
+Up to three writer cards are shown only when Local/Beat Writers or Independent Writers is selected under Sources. Cards use reviewed profiles where available and otherwise use real bylines from the filtered live articles; the byline cards link to the cited story and name its team and publisher. In My Teams, cards must match a selected team. In Discovery, cards come from league-wide coverage and respect the selected league. Cards are hidden in Rumors and Saved views. Add real, reviewed profiles to public/featured-writers.json using the shape and criteria in FEATURED_WRITERS.md.
 
 ## Saved stories
 

@@ -1,4 +1,174 @@
 {
-  "beatWriters": [],
-  "independentWriters": []
+  "reviewedOn": "2026-10-29",
+  "beatWriters": [
+    {
+      "name": "Andrew Mason",
+      "league": "NFL",
+      "team": "Denver Broncos",
+      "label": "Senior Broncos writer · Denver Sports",
+      "profileUrl": "https://denversports.com/author/andrewmason",
+      "photoUrl": "https://cdn.denversports.com/kkfn/wp-content/uploads/2022/05/cropped-Andrew_Mason_Headshot_FULL_RES-scaled-e1652481420530.jpg"
+    },
+    {
+      "name": "Chris Tomasson",
+      "league": "NFL",
+      "team": "Denver Broncos",
+      "label": "Broncos beat writer · Denver Gazette",
+      "profileUrl": "https://www.denvergazette.com/author/chris-tomasson/",
+      "photoUrl": "https://secure.gravatar.com/avatar/c148c7b922fc85bff84088a61d5012f17b7d8b6a36485a4de7ec8724e9af15ff?d=mm&r=g&s=320"
+    },
+    {
+      "name": "Parker Gabriel",
+      "league": "NFL",
+      "team": "Denver Broncos",
+      "label": "Broncos beat reporter · The Denver Post",
+      "profileUrl": "https://muckrack.com/parker-gabriel",
+      "photoUrl": "https://media.muckrack.com/profile/images/622511/parker-gabriel.jpeg.256x256_q100_crop-smart.jpg"
+    },
+    {
+      "name": "Zach Cavanagh",
+      "league": "NHL",
+      "team": "Anaheim Ducks",
+      "label": "Ducks reporter · The Sporting Tribune",
+      "profileUrl": "https://www.thesportingtribune.com/author/zachcavanagh"
+    },
+    {
+      "name": "Andrew Knoll",
+      "league": "NHL",
+      "team": "Anaheim Ducks",
+      "label": "Ducks beat reporter · RG Media",
+      "profileUrl": "https://rg.org/authors/andrew-knoll"
+    },
+    {
+      "name": "Patrick Present",
+      "league": "NHL",
+      "team": "Anaheim Ducks",
+      "label": "Ducks site editor and reporter · The Hockey News",
+      "profileUrl": "https://thehockeynews.com/nhl/anaheim-ducks/author/patrick-present"
+    },
+    {
+      "name": "Jeff Fletcher",
+      "league": "MLB",
+      "team": "Los Angeles Angels",
+      "label": "Angels beat writer · Orange County Register",
+      "profileUrl": "https://bbwaa.com/members/jeff-fletcher/"
+    },
+    {
+      "name": "Thomas Murray",
+      "league": "MLB",
+      "team": "Los Angeles Angels",
+      "label": "Angels analyst · The Sporting Tribune",
+      "profileUrl": "https://www.thesportingtribune.com/author/thomasmurray"
+    },
+    {
+      "name": "Taylor Blake Ward",
+      "league": "MLB",
+      "team": "Los Angeles Angels",
+      "label": "Angels and MLB Draft reporter · The Sporting Tribune",
+      "profileUrl": "https://www.thesportingtribune.com/author/taylorblakeward"
+    },
+    {
+      "name": "Vinny Benedetto",
+      "league": "NBA",
+      "team": "Denver Nuggets",
+      "label": "Nuggets beat writer · Denver Gazette",
+      "profileUrl": "https://www.denvergazette.com/author/vinny-benedetto/"
+    },
+    {
+      "name": "Bennett Durando",
+      "league": "NBA",
+      "team": "Denver Nuggets",
+      "label": "Nuggets beat writer · The Denver Post",
+      "profileUrl": "https://muckrack.com/bennett-durando"
+    }
+  ],
+  "independentWriters": [
+    {
+      "name": "Zac Stevens",
+      "league": "NFL",
+      "team": "Denver Broncos",
+      "label": "Independent Broncos coverage · DNVR",
+      "profileUrl": "https://thednvr.com/author/zac-stevens/",
+      "photoUrl": "https://thednvr.com/wp-content/uploads/sites/6/2023/12/Zac-Head-USER.png"
+    },
+    {
+      "name": "Tim Lynch",
+      "league": "NFL",
+      "team": "Denver Broncos",
+      "label": "Independent Broncos coverage · Mile High Report",
+      "profileUrl": "https://www.milehighreport.com/authors/tim-lynch",
+      "photoUrl": "https://platform.milehighreport.com/wp-content/uploads/sites/108/chorus/author_profile_images/194690/tim2.0.jpg?crop=0%2C0%2C100%2C100&quality=90&strip=all&w=2400"
+    },
+    {
+      "name": "Scotty Payne",
+      "league": "NFL",
+      "team": "Denver Broncos",
+      "label": "Independent Broncos coverage · Mile High Report",
+      "profileUrl": "https://www.milehighreport.com/authors/scotty-payne",
+      "photoUrl": "https://platform.milehighreport.com/wp-content/uploads/sites/108/chorus/author_profile_images/197186/FB_IMG_1687997825476_-_Scott_Payne.0.jpg?crop=0%2C0%2C100%2C100&quality=90&strip=all&w=2400"
+    },
+    {
+      "name": "Hayley Paljug",
+      "league": "NHL",
+      "team": "Anaheim Ducks",
+      "label": "Independent Ducks coverage · The Hockey Writers",
+      "profileUrl": "https://thehockeywriters.com/author/hpaljug/"
+    },
+    {
+      "name": "Ethan McGarvey",
+      "league": "NHL",
+      "team": "Anaheim Ducks",
+      "label": "Independent Ducks coverage · Pucks of a Feather",
+      "profileUrl": "https://pucksofafeather.com/author/ethanmcgarvey/"
+    },
+    {
+      "name": "Derek Lee",
+      "league": "NHL",
+      "team": "Anaheim Ducks",
+      "label": "Independent Ducks coverage · The Hockey News",
+      "profileUrl": "https://thehockeynews.com/nhl/anaheim-ducks/author/derek-lee"
+    },
+    {
+      "name": "Cade Lalim",
+      "league": "MLB",
+      "team": "Los Angeles Angels",
+      "label": "Independent Angels coverage · Just Baseball",
+      "profileUrl": "https://www.justbaseball.com/author/cadelalim/"
+    },
+    {
+      "name": "Drew Koch",
+      "league": "MLB",
+      "team": "Los Angeles Angels",
+      "label": "Independent Angels coverage · Halo Hangout",
+      "profileUrl": "https://halohangout.com/author/dkoch"
+    },
+    {
+      "name": "Stephen Parello",
+      "league": "MLB",
+      "team": "Los Angeles Angels",
+      "label": "Independent Angels coverage · Halo Hangout",
+      "profileUrl": "https://halohangout.com/author/sparello"
+    },
+    {
+      "name": "Brendan Vogt",
+      "league": "NBA",
+      "team": "Denver Nuggets",
+      "label": "Independent Nuggets coverage · DNVR",
+      "profileUrl": "https://thednvr.com/author/vogt/"
+    },
+    {
+      "name": "Ryan Blackburn",
+      "league": "NBA",
+      "team": "Denver Nuggets",
+      "label": "Independent Nuggets coverage · Mile High Sports",
+      "profileUrl": "https://milehighsports.com/author/ryanblackburn/"
+    },
+    {
+      "name": "Adam Mares",
+      "league": "NBA",
+      "team": "Denver Nuggets",
+      "label": "Independent Nuggets coverage · DNVR",
+      "profileUrl": "https://thednvr.com/author/adammares/"
+    }
+  ]
 }

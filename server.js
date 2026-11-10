@@ -133,7 +133,7 @@ function classifySourceName(value) {
   const officialTeam = Object.keys(teamLeague).some(team => source.includes(normalizedArticleText(team)));
   if (officialTeam || officialSites.some(name => source.includes(name))) return 'Team/League';
   if (['orange county register', 'oc register', 'los angeles times', 'la times', 'denver post', 'mercury news', 'san francisco chronicle', 'knbr', 'new york post', 'tampa bay times', 'boston globe', 'seattle times', 'chicago tribune'].some(name => source.includes(name))) return 'Local/Beat';
-  if (['sb nation', 'fansided', 'substack', 'blogspot', 'the hockey writers', 'mile high report', 'true blue la', 'halos heaven', 'anaheim calling', 'dnvr sports'].some(name => source.includes(name))) return 'Independent';
+  if (['sb nation', 'fansided', 'substack', 'blogspot', 'the hockey writers', 'the hockey news', 'mile high report', 'mile high sports', 'true blue la', 'halos heaven', 'halo hangout', 'anaheim calling', 'dnvr', 'just baseball', 'pucks of a feather', 'pro football network', 'sportsnaut', 'mlb trade rumors', 'hoops rumors', 'basketball news', 'hockeybuzz'].some(name => source.includes(name))) return 'Independent';
   if (['espn', 'cbs sports', 'yahoo sports', 'associated press', 'ap news', 'usa today', 'fox sports', 'the athletic', 'sports illustrated', 'bleacher report'].some(name => source.includes(name))) return 'National';
   return 'Other';
 }
@@ -148,6 +148,16 @@ function classifyArticleTypes(content) {
 function feedSearchPhrase(feedType) {
   return ({ analysis: 'analysis OR breakdown OR opinion', gameDay: 'game preview OR live updates OR recap', rumors: 'trade rumor OR player rumor OR coaching rumor OR speculation' })[feedType] || 'team news';
 }
+const independentSites = {
+  NFL: ['sbnation.com', 'fansided.com', 'thednvr.com', 'milehighreport.com', 'profootballnetwork.com', 'sportsnaut.com'],
+  NBA: ['sbnation.com', 'fansided.com', 'thednvr.com', 'milehighsports.com', 'basketballnews.com', 'hoopsrumors.com'],
+  MLB: ['sbnation.com', 'fansided.com', 'justbaseball.com', 'halohangout.com', 'mlbtraderumors.com'],
+  NHL: ['sbnation.com', 'fansided.com', 'thehockeywriters.com', 'pucksofafeather.com', 'hockeybuzz.com', 'thehockeynews.com']
+};
+function independentSiteQuery(league) {
+  const sites = independentSites[league] || [];
+  return sites.length ? '(' + sites.map(site => 'site:' + site).join(' OR ') + ')' : '';
+}
 function parseRss(xml, team, league) {
   const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
   const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
@@ -159,16 +169,19 @@ function parseRss(xml, team, league) {
   }).filter(x => { const published = Date.parse(x.date); return x.title && x.link && Number.isFinite(published) && published <= Date.now() && published >= cutoff && isAllowedArticle(x); })
     .sort((a, b) => Date.parse(b.date) - Date.parse(a.date)).slice(0, 20);
 }
-const leagueSearchTerms = { NFL: 'football NFL', NBA: 'basketball NBA', MLB: 'baseball MLB', NHL: 'hockey NHL' }; function articleMatchesTeam(item, team) { const text = normalizedArticleText([item.title, item.description, item.source].filter(Boolean).join(' ')); const nickname = team.split(' ').at(-1).toLowerCase(); const owners = Object.keys(teamLeague).filter(name => name.split(' ').at(-1).toLowerCase() === nickname); const aliases = [normalizedArticleText(team)]; if (owners.length === 1) aliases.push(normalizedArticleText(nickname)); if (!aliases.some(alias => (' ' + text + ' ').includes(' ' + alias + ' '))) return false; const league = teamLeague[team]; const wrongSport = { NFL: /\b(?:basketball|nba|baseball|mlb|hockey|nhl)\b/i, NBA: /\b(?:football|nfl|baseball|mlb|hockey|nhl)\b/i, MLB: /\b(?:football|nfl|basketball|nba|hockey|nhl)\b/i, NHL: /\b(?:football|nfl|basketball|nba|baseball|mlb)\b/i }; return item.league === league && !wrongSport[league]?.test(text); } async function articlesFor(team, feedType = 'latest') {
+const leagueSearchTerms = { NFL: 'football NFL', NBA: 'basketball NBA', MLB: 'baseball MLB', NHL: 'hockey NHL' }; function articleMatchesTeam(item, team) { const text = normalizedArticleText([item.title, item.description, item.source].filter(Boolean).join(' ')); const nickname = team.split(' ').at(-1).toLowerCase(); const owners = Object.keys(teamLeague).filter(name => name.split(' ').at(-1).toLowerCase() === nickname); const aliases = [normalizedArticleText(team)]; if (owners.length === 1) aliases.push(normalizedArticleText(nickname)); if (!aliases.some(alias => (' ' + text + ' ').includes(' ' + alias + ' '))) return false; const league = teamLeague[team]; const wrongSport = { NFL: /\b(?:basketball|nba|baseball|mlb|hockey|nhl)\b/i, NBA: /\b(?:football|nfl|baseball|mlb|hockey|nhl)\b/i, MLB: /\b(?:football|nfl|basketball|nba|hockey|nhl)\b/i, NHL: /\b(?:football|nfl|basketball|nba|baseball|mlb)\b/i }; return item.league === league && !wrongSport[league]?.test(text); } async function articlesFor(team, feedType = 'latest', sourceFilter = 'all') {
   const league = teamLeague[team] || 'National';
   if (team === 'National Headlines') {
     const queries = [['NFL', 'NFL football latest news teams coaches players'], ['NBA', 'NBA basketball latest news teams players'], ['MLB', 'MLB baseball latest news teams players'], ['NHL', 'NHL hockey latest news teams players']];
-    const batches = await Promise.all(queries.map(async pair => { try { const phrase = feedType === 'latest' ? pair[1] : pair[0] + ' ' + leagueSearchTerms[pair[0]] + ' ' + feedSearchPhrase(feedType); const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(phrase + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0]) : []; } catch { return []; } }));
+    const batches = await Promise.all(queries.map(async pair => { try { const base = feedType === 'latest' ? pair[1] : pair[0] + ' ' + leagueSearchTerms[pair[0]] + ' ' + feedSearchPhrase(feedType); const phrase = sourceFilter === 'independent' ? base + ' ' + independentSiteQuery(pair[0]) : base; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(phrase + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0]) : []; } catch { return []; } }));
     const all = batches.flat(), seen = new Set(), varied = all.filter(a => { if (seen.has(a.source)) return false; seen.add(a.source); return true; }), rest = all.filter(a => !varied.includes(a));
     varied.sort((a, b) => Date.parse(b.date) - Date.parse(a.date)); rest.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
     return [...varied, ...rest].slice(0, 20);
   }
-  try { const sport = leagueSearchTerms[league] || ''; const query = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' ') + ' when:3d'; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); } catch {}
+  try { const sport = leagueSearchTerms[league] || ''; const base = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' '); const query = sourceFilter === 'independent' ? base + ' ' + independentSiteQuery(league) : base; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) { const articles = parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); if (articles.length || sourceFilter !== 'independent') return articles; } } catch {}
+  if (sourceFilter === 'independent') {
+    try { const sport = leagueSearchTerms[league] || ''; const query = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' ') + ' when:3d'; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); } catch {}
+  }
   return [];
 }
 
@@ -357,7 +370,8 @@ async function handler(req, res) {
     const account = isDiscovery ? null : await authenticatedUser(req);
     if (!isDiscovery && !account) return send(res, 401, { error: 'Log in to load your selected teams.' });
     const teams = isDiscovery ? ['National Headlines'] : (Array.isArray(account.teams) ? account.teams.filter(team => teamLeague[team]) : []);
-    const articles = (await Promise.all(teams.map(team => articlesFor(team, feedType)))).flat();
+    const sourceFilter = ['national', 'beat', 'independent', 'team'].includes(url.searchParams.get('source')) ? url.searchParams.get('source') : 'all';
+    const articles = (await Promise.all(teams.map(team => articlesFor(team, feedType, sourceFilter)))).flat();
     return send(res, 200, { updatedAt: new Date().toISOString(), articles });
   }
   if (url.pathname === '/api/saved-stories') {
