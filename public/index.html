@@ -88,7 +88,7 @@ async function loadFeaturedWriters() {
   } catch {}
   if (!featuredWriterLists) featuredWriterLists = { beatWriters: [], independentWriters: [] };
 }
-function renderFeaturedWriters() {
+function renderFeaturedWriters(articles = []) {
   const key = sourceFilter === 'beat' ? 'beatWriters' :
     sourceFilter === 'independent' ? 'independentWriters' : '';
   const section = $('writerSection');
@@ -97,12 +97,48 @@ function renderFeaturedWriters() {
   $('writerHeadingText').textContent = sourceFilter === 'beat' ?
     'FanOptic Top 3 · Local/Beat Writers' : 'FanOptic Top 3 · Independent Writers';
   const teams = user && Array.isArray(user.teams) ? user.teams : [];
-  const profiles = (featuredWriterLists[key] || []).filter(profile => {
+  const curatedProfiles = (featuredWriterLists[key] || []).filter(profile => {
     if (!validExternalUrl(profile.profileUrl)) return false;
-    if (league !== 'All' && profile.league && profile.league !== league) return false;
-    if (feedMode === 'myTeams' && profile.team && teams.length && !teams.includes(profile.team)) return false;
+    if (league !== 'All' && profile.league !== league) return false;
+    // In My Teams, only show writer cards tied to an explicitly selected team.
+    // A missing team must never make a general or unrelated profile slip in.
+    if (feedMode === 'myTeams' && (!profile.team || !teams.includes(profile.team))) return false;
     return true;
-  }).slice(0, 3);
+  });
+  // Build additional cards from real bylines in the already filtered feed.
+  // This works for every selectable team and never invents a writer identity.
+  const seenBylines = new Set(curatedProfiles.map(profile => String(profile.name || '').trim().toLowerCase()));
+  const dynamicProfiles = [];
+  for (const article of [...articles].sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0))) {
+    const name = String(article.author || '').trim();
+    const url = validExternalUrl(article.link);
+    if (!name || !url || seenBylines.has(name.toLowerCase())) continue;
+    if (league !== 'All' && article.league !== league) continue;
+    if (feedMode === 'myTeams' && (!article.team || !teams.includes(article.team))) continue;
+    seenBylines.add(name.toLowerCase());
+    dynamicProfiles.push({ name, league: article.league, team: article.team,
+      label: 'Recent coverage · ' + [article.team, article.source].filter(Boolean).join(' · '),
+      profileUrl: url });
+  }
+  const matchingProfiles = feedMode === 'myTeams' ?
+    [...curatedProfiles, ...dynamicProfiles] : [...dynamicProfiles, ...curatedProfiles];
+  // Keep the row to three cards and spread My Teams picks across selected
+  // teams when the current coverage has bylines from more than one team.
+  let profiles = matchingProfiles;
+  if (feedMode === 'myTeams') {
+    const matchedTeams = teams.filter(team => matchingProfiles.some(profile => profile.team === team));
+    profiles = [];
+    for (let round = 0; profiles.length < 3; round++) {
+      let added = false;
+      for (const team of matchedTeams) {
+        const candidate = matchingProfiles.filter(profile => profile.team === team)[round];
+        if (candidate) { profiles.push(candidate); added = true; }
+        if (profiles.length === 3) break;
+      }
+      if (!added) break;
+    }
+  }
+  profiles = profiles.slice(0, 3);
   $('writerGrid').innerHTML = profiles.map(profile => {
     const url = validExternalUrl(profile.profileUrl), photo = validExternalUrl(profile.photoUrl);
     const initials = String(profile.name || '').trim().split(/\s+/).slice(0, 2)
@@ -113,7 +149,7 @@ function renderFeaturedWriters() {
     return '<a class="writerProfile" href="' + safe(url) + '" target="_blank" rel="noopener noreferrer">' +
       avatar + '<span class="writerIdentity"><span class="writerName">' + safe(profile.name) +
       '</span><span class="writerLabel">' + safe(profile.label || 'Sports writer') + '</span></span></a>';
-  }).join('') || '<div class="writerEmpty">FanOptic’s featured writers for this category will appear here after their profiles and recent team coverage are reviewed.</div>';
+  }).join('') || '<div class="writerEmpty">No writer bylines are available in this filtered coverage yet. Try Latest or another source category.</div>';
 }
 function renderFeedControls() {
   document.querySelectorAll('.feedType').forEach(button => {
@@ -167,7 +203,7 @@ async function load() {
       if (discovery) discovery.onclick = () => setFeedMode('discover');
       return;
     }
-    const params = new URLSearchParams({ feedType });
+    const params = new URLSearchParams({ feedType, source: sourceFilter });
     if (feedMode === 'discover') params.set('mode', 'discover');
     else params.set('teams', user.teams.join(','));
     const token = localStorage.getItem('fanoptic_token') || '';
@@ -184,8 +220,8 @@ async function load() {
     if (feedType !== 'latest' && !articleTypes(article).includes(feedType)) return false;
     return !query || text.includes(query);
   }).sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0));
-  renderFeaturedWriters();
   currentArticles = matches;
+  renderFeaturedWriters(matches);
   $('feed').innerHTML = matches.map((article, index) => {
     const stamp = article.date ? new Date(article.date).toLocaleString([], {
       month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
