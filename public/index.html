@@ -172,6 +172,14 @@ function renderFeaturedWriters(articles = []) {
   }).join('') || '<div class="writerEmpty">No writer bylines are available in this filtered coverage yet. Try Latest or another source category.</div>';
 }
 function renderFeedControls() {
+  const sourceControl = document.querySelector('.sourceControl');
+  if (sourceControl && !$('freshOnly')) {
+    const label = document.createElement('label'); label.className = 'freshToggle';
+    label.innerHTML = '<input id="freshOnly" type="checkbox"> Fresh only';
+    sourceControl.appendChild(label);
+    $('freshOnly').onchange = () => { window._fanopticFreshOnly = $('freshOnly').checked; load(); };
+  }
+  if ($('freshOnly')) $('freshOnly').checked = Boolean(window._fanopticFreshOnly);
   document.querySelectorAll('.feedType').forEach(button => {
     const active = button.dataset.feedType === feedType;
     button.classList.toggle('active', active);
@@ -223,12 +231,13 @@ async function load() {
       if (discovery) discovery.onclick = () => setFeedMode('discover');
       return;
     }
-    const params = new URLSearchParams({ feedType, source: sourceFilter });
+    const params = new URLSearchParams({ feedType, source: sourceFilter, freshOnly: Boolean(window._fanopticFreshOnly) });
     if (feedMode === 'discover') params.set('mode', 'discover');
     else params.set('teams', user.teams.join(','));
     const token = localStorage.getItem('fanoptic_token') || '';
     const path = '/api/articles?' + params.toString();
     const response = await fetch(path, { headers: token ? { Authorization: 'Bearer ' + token } : {} }), data = await response.json();
+    $('feedNotice').textContent = data.expandedCoverage ? 'Expanded coverage: showing relevant stories from the past ' + data.coverageDays + ' days because this team had fewer than 10 fresh stories.' : '';
     articles = Array.isArray(data.articles) ? data.articles : [];
   }
   await loadFeaturedWriters();
