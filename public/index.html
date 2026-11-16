@@ -105,7 +105,7 @@ function renderFeaturedWriters(articles = []) {
   if (!$('writerCardSizing')) {
     const style = document.createElement('style');
     style.id = 'writerCardSizing';
-    style.textContent = '.writerGrid{display:block}.writerTeamGroup{padding:16px 0;border-top:1px solid var(--l)}.writerTeamGroup:first-child{border-top:0;padding-top:0}.writerTeamHeading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px}.writerTeamHeading h3{margin:0;color:var(--c);font:bold 19px Georgia,serif}.writerTeamHeading span{color:var(--m);font:11px Arial,sans-serif;text-transform:uppercase;letter-spacing:.7px}.writerCards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.writerProfile{align-items:flex-start;min-height:86px;padding:11px;gap:11px}.writerPhoto,.writerInitials{width:62px;height:62px;flex:0 0 62px}.writerIdentity{flex:1 1 auto;min-width:0;overflow:hidden}.writerName{display:block;font:bold 17px/1.15 Georgia,serif;overflow-wrap:anywhere}.writerLabel{display:block;margin-top:6px;font:11px/1.3 Arial,sans-serif;letter-spacing:.35px;overflow-wrap:anywhere}.writerPhoto[broken]{display:none}@media(max-width:950px){.writerCards{grid-template-columns:1fr 1fr}}@media(max-width:800px){.writerCards{grid-template-columns:1fr}}';
+    style.textContent = '.writerGrid{display:block}.writerTeamGroup{padding:16px 0;border-top:1px solid var(--l)}.writerTeamGroup:first-child{border-top:0;padding-top:0}.writerTeamHeading{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px}.writerTeamHeading h3{margin:0;color:var(--c);font:bold 19px Georgia,serif}.writerTeamHeading span{color:var(--m);font:11px Arial,sans-serif;text-transform:uppercase;letter-spacing:.7px}.writerCards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:start}.writerProfile{align-self:start;align-items:flex-start;height:max-content;min-height:0;padding:9px;gap:9px}.writerPhoto,.writerInitials{width:50px;height:50px;flex:0 0 50px}.writerIdentity{flex:1 1 auto;min-width:0;overflow:hidden}.writerName{display:block;font:bold 15px/1.15 Georgia,serif;overflow-wrap:anywhere}.writerLabel{display:block;margin-top:5px;font:10px/1.25 Arial,sans-serif;letter-spacing:.25px;overflow-wrap:anywhere}.writerPhoto[broken]{display:none}@media(max-width:950px){.writerCards{grid-template-columns:1fr 1fr}}@media(max-width:800px){.writerCards{grid-template-columns:1fr}}';
     document.head.appendChild(style);
   }
   const key = sourceFilter === 'beat' ? 'beatWriters' :
@@ -115,14 +115,15 @@ function renderFeaturedWriters(articles = []) {
   section.hidden = false;
   $('writerHeadingText').textContent = sourceFilter === 'beat' ?
     'FanOptic Top 3 · Local/Beat Writers' : 'FanOptic Top 3 · Independent Writers';
-  const teams = user && Array.isArray(user.teams) ? user.teams : [];
+  const selectedTeams = user && Array.isArray(user.teams) ? user.teams : [];
+  const leagueTeams = league === 'All' ? selectedTeams : selectedTeams.filter(team => String(teams[league] || '').split('|').includes(team));
   const curatedProfiles = (featuredWriterLists[key] || []).filter(profile => {
     if (!validExternalUrl(profile.profileUrl)) return false;
     if (league !== 'All' && profile.league !== league) return false;
     if (!profile.team) return false;
     // In My Teams, only show writer cards tied to an explicitly selected team.
     // A missing team must never make a general or unrelated profile slip in.
-    if (feedMode === 'myTeams' && (!profile.team || !teams.includes(profile.team))) return false;
+    if (feedMode === 'myTeams' && (!profile.team || !selectedTeams.includes(profile.team))) return false;
     return true;
   });
   // Build additional cards from real bylines in the already filtered feed.
@@ -134,7 +135,7 @@ function renderFeaturedWriters(articles = []) {
     const url = validExternalUrl(article.link);
     if (!name || !url || seenBylines.has(name.toLowerCase())) continue;
     if (league !== 'All' && article.league !== league) continue;
-    if (!article.team || (feedMode === 'myTeams' && !teams.includes(article.team))) continue;
+    if (!article.team || (feedMode === 'myTeams' && !selectedTeams.includes(article.team))) continue;
     seenBylines.add(name.toLowerCase());
     dynamicProfiles.push({ name, league: article.league, team: article.team,
       label: 'Recent coverage · ' + [article.team, article.source].filter(Boolean).join(' · '),
@@ -146,7 +147,7 @@ function renderFeaturedWriters(articles = []) {
     const list = profilesByTeam.get(profile.team);
     if (list.length < 3) list.push(profile);
   }
-  const teamOrder = feedMode === 'myTeams' ? teams : [...new Set([
+  const teamOrder = feedMode === 'myTeams' ? leagueTeams : [...new Set([
     ...curatedProfiles.map(profile => profile.team),
     ...articles.map(article => article.team).filter(Boolean)
   ])];
