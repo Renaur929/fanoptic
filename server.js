@@ -9,6 +9,7 @@ const dataDir = path.join(root, 'data');
 const usersFile = path.join(dataDir, 'users.json');
 const outboxFile = path.join(dataDir, 'outbox.json');
 const savedStoriesFile = path.join(dataDir, 'saved-stories.json');
+const fantasyRostersFile = path.join(dataDir, 'fantasy-rosters.json');
 const sessions = new Map();
 const resetRequests = new Map();
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -66,6 +67,14 @@ async function deleteSavedStories(userId) {
   if (accountDb) { await accountDb.query('DELETE FROM fanoptic_saved_stories WHERE user_id = $1', [userId]); return; }
   const saved = await readJson(savedStoriesFile, {}); delete saved[userId]; await writeJson(savedStoriesFile, saved);
 }
+async function getFantasyRoster(userId) {
+  if (accountDb) { const result = await accountDb.query('SELECT roster_data, updated_at FROM fanoptic_fantasy_rosters WHERE user_id = $1 LIMIT 1', [userId]); return result.rows[0] ? { ...result.rows[0].roster_data, updatedAt: result.rows[0].updated_at } : null; }
+  const rosters = await readJson(fantasyRostersFile, {}); return rosters[userId] || null;
+}
+async function saveFantasyRoster(userId, roster) {
+  if (accountDb) { await accountDb.query('INSERT INTO fanoptic_fantasy_rosters (user_id, roster_data, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (user_id) DO UPDATE SET roster_data = EXCLUDED.roster_data, updated_at = NOW()', [userId, JSON.stringify(roster)]); return; }
+  const rosters = await readJson(fantasyRostersFile, {}); rosters[userId] = { ...roster, updatedAt: new Date().toISOString() }; await writeJson(fantasyRostersFile, rosters);
+}
 async function initializeAccountStore() {
   if (!process.env.DATABASE_URL) { console.warn('DATABASE_URL is not set; account storage is using the temporary JSON fallback.'); return; }
   const { Pool } = await import('pg');
@@ -83,6 +92,7 @@ async function initializeAccountStore() {
   await accountDb.query('CREATE INDEX IF NOT EXISTS fanoptic_sessions_user_id_idx ON fanoptic_sessions(user_id)');
   await accountDb.query('CREATE TABLE IF NOT EXISTS fanoptic_saved_stories (user_id TEXT NOT NULL REFERENCES fanoptic_users(id) ON DELETE CASCADE, article_url TEXT NOT NULL, article_data JSONB NOT NULL, saved_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (user_id, article_url))');
   await accountDb.query('CREATE INDEX IF NOT EXISTS fanoptic_saved_stories_user_saved_idx ON fanoptic_saved_stories(user_id, saved_at DESC)');
+  await accountDb.query('CREATE TABLE IF NOT EXISTS fanoptic_fantasy_rosters (user_id TEXT PRIMARY KEY REFERENCES fanoptic_users(id) ON DELETE CASCADE, roster_data JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())');
   await accountDb.query('SELECT 1');
   console.log('Account storage connected to PostgreSQL.');
 }
@@ -237,6 +247,53 @@ async function liveScores(favoriteTeams = []) {
   return batches.flat().sort((a, b) => rank(a) - rank(b) || Number(a.timestamp) - Number(b.timestamp));
 }
 
+const fantasyPlayerCache = { expiresAt: 0, players: [] };
+async function freeFantasyPlayers() {
+  if (fantasyPlayerCache.players.length && fantasyPlayerCache.expiresAt > Date.now()) return fantasyPlayerCache.players;
+  const response = await fetch('https://api.sleeper.app/v1/players/nfl?active=true');
+  if (!response.ok) throw new Error('Sleeper player directory unavailable');
+  const data = await response.json();
+  fantasyPlayerCache.players = Object.entries(data).map(([id, player]) => ({
+    id, name: player.full_name || [player.first_name, player.last_name].filter(Boolean).join(' '), team: player.team || '', position: player.position || player.fantasy_positions?.[0] || '', fantasyPositions: player.fantasy_positions || [], espnId: player.espn_id || '', injuryStatus: player.injury_status || '', injuryStartDate: player.injury_start_date || '', active: player.status === 'Active'
+  })).filter(player => player.name && player.active);
+  fantasyPlayerCache.expiresAt = Date.now() + 12 * 60 * 60 * 1000;
+  return fantasyPlayerCache.players;
+}
+function normalizeFantasyQuery(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function extractFantasyStatLine(value, output = {}) {
+  const aliases = {
+    passingYards: ['passingyards', 'passyards'], passingTDs: ['passingtouchdowns', 'passingtds', 'passtd'], interceptions: ['interceptions', 'interceptions thrown'],
+    rushingYards: ['rushingyards', 'rushyards'], rushingTDs: ['rushingtouchdowns', 'rushingtds', 'rushtd'],
+    receptions: ['receptions', 'rec'], receivingYards: ['receivingyards', 'recyards'], receivingTDs: ['receivingtouchdowns', 'receivingtds', 'rectd'],
+    fumblesLost: ['fumbleslost'], twoPointConversions: ['twopointconversions', '2ptconversions']
+  };
+  const assign = (key, raw) => { const normalized = normalizeFantasyQuery(key); const number = Number(raw); if (!Number.isFinite(number)) return; for (const [target, names] of Object.entries(aliases)) if (names.some(name => normalized.includes(name))) output[target] = number; };
+  if (Array.isArray(value)) { for (const item of value) extractFantasyStatLine(item, output); return output; }
+  if (!value || typeof value !== 'object') return output;
+  if (value.name && value.value != null) assign(value.name, value.value);
+  if (value.label && value.value != null) assign(value.label, value.value);
+  for (const [key, child] of Object.entries(value)) { if (typeof child === 'number' || typeof child === 'string') assign(key, child); else if (child && typeof child === 'object') extractFantasyStatLine(child, output); }
+  return output;
+}
+async function freeFantasyPlayerSearch(query = '', limit = 80) {
+  const players = await freeFantasyPlayers(), needle = normalizeFantasyQuery(query);
+  return players.filter(player => !needle || normalizeFantasyQuery(player.name).includes(needle)).sort((a, b) => (Number(a.injuryStatus !== '') - Number(b.injuryStatus !== '')) || a.name.localeCompare(b.name)).slice(0, Math.min(Math.max(Number(limit) || 80, 1), 200));
+}
+async function freeFantasyOverview(names = []) {
+  const players = await freeFantasyPlayers(), wanted = new Set(names.map(normalizeFantasyQuery));
+  const matches = players.filter(player => wanted.has(normalizeFantasyQuery(player.name)) && player.espnId).slice(0, 30);
+  const results = await Promise.all(matches.map(async player => {
+    try {
+      const response = await fetch('https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/' + encodeURIComponent(player.espnId) + '/overview');
+      if (!response.ok) return { ...player, source: 'Sleeper', available: false };
+      const data = await response.json();
+      const statLine = extractFantasyStatLine(data.statistics || data.stats || data);
+      return { ...player, source: 'ESPN + Sleeper', available: true, statLine, overview: data.statistics || data.stats || null, nextGame: data.nextGame || null, news: Array.isArray(data.news) ? data.news.slice(0, 3) : [] };
+    } catch { return { ...player, source: 'Sleeper', available: false }; }
+  }));
+  return { updatedAt: new Date().toISOString(), source: 'Free public data', players: results };
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
@@ -383,6 +440,23 @@ async function handler(req, res) {
     if (!user) return send(res, 400, { error: 'This reset link is invalid or expired. Request another one.' });
     await updateUserRecord(user.id, { passwordHash: hash(password), passwordResetTokenHash: null, passwordResetExpiresAt: null }); await revokeUserSessions(user.id);
     return send(res, 200, { ok: true, message: 'Password updated. You can now log in.' });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/fantasy/players') {
+    try { return send(res, 200, { updatedAt: new Date().toISOString(), source: 'Sleeper player directory', players: await freeFantasyPlayerSearch(url.searchParams.get('q') || '', url.searchParams.get('limit') || 80) }); }
+    catch { return send(res, 503, { error: 'Free player directory is temporarily unavailable.' }); }
+  }
+  if (req.method === 'GET' && url.pathname === '/api/fantasy/stats') {
+    try { const names = String(url.searchParams.get('names') || '').split('|').map(name => name.trim()).filter(Boolean); return send(res, 200, await freeFantasyOverview(names)); }
+    catch { return send(res, 503, { error: 'Free fantasy stats are temporarily unavailable.' }); }
+  }
+  if (url.pathname === '/api/fantasy/roster') {
+    const user = await authenticatedUser(req); if (!user) return send(res, 401, { error: 'Log in to save your fantasy roster.' });
+    if (req.method === 'GET') return send(res, 200, { roster: await getFantasyRoster(user.id) });
+    if (req.method === 'PUT') {
+      const input = await body(req), roster = { leagueType: String(input.leagueType || '12-team').slice(0, 30), scoringType: String(input.scoringType || 'PPR TE+').slice(0, 30), starters: Array.isArray(input.starters) ? input.starters.slice(0, 12) : [], bench: Array.isArray(input.bench) ? input.bench.slice(0, 12) : [] };
+      await saveFantasyRoster(user.id, roster); return send(res, 200, { ok: true, roster: await getFantasyRoster(user.id) });
+    }
+    return send(res, 405, { error: 'Method not allowed.' });
   }
   if (req.method === 'GET' && url.pathname === '/api/articles') {
     const isDiscovery = url.searchParams.get('mode') === 'discover'; const requestedFeedType = url.searchParams.get('feedType'), feedType = ['latest', 'analysis', 'gameDay', 'rumors'].includes(requestedFeedType) ? requestedFeedType : 'latest';
