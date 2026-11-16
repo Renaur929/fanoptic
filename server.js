@@ -296,7 +296,10 @@ function extractFantasyStatLine(value, output = {}) {
 }
 async function freeFantasyPlayerSearch(query = '', limit = 80) {
   const players = await freeFantasyPlayers(), needle = normalizeFantasyQuery(query);
-  return players.filter(player => !needle || normalizeFantasyQuery(player.name).includes(needle)).sort((a, b) => (Number(a.injuryStatus !== '') - Number(b.injuryStatus !== '')) || a.name.localeCompare(b.name)).slice(0, Math.min(Math.max(Number(limit) || 80, 1), 200));
+  return players.filter(player => !needle || normalizeFantasyQuery(player.name).includes(needle)).sort((a, b) => {
+    const rank = player => !needle ? 0 : normalizeFantasyQuery(player.name) === needle ? 0 : normalizeFantasyQuery(player.name).startsWith(needle) ? 1 : 2;
+    return rank(a) - rank(b) || (Number(a.injuryStatus !== '') - Number(b.injuryStatus !== '')) || a.name.localeCompare(b.name);
+  }).slice(0, Math.min(Math.max(Number(limit) || 80, 1), 200));
 }
 async function freeFantasyOverview(names = []) {
   const players = await freeFantasyPlayers(), wanted = new Set(names.map(normalizeFantasyQuery));
