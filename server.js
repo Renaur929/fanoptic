@@ -294,6 +294,22 @@ function extractFantasyStatLine(value, output = {}) {
   for (const [key, child] of Object.entries(value)) { if (typeof child === 'number' || typeof child === 'string') assign(key, child); else if (child && typeof child === 'object') extractFantasyStatLine(child, output); }
   return output;
 }
+function extractFantasyRecentGames(gameLog) {
+  if (!gameLog || typeof gameLog !== 'object') return [];
+  const byEvent = new Map(Object.values(gameLog.events || {}).map(event => [String(event.id), { ...event, stats: {} }]));
+  for (const category of gameLog.statistics || []) {
+    const names = Array.isArray(category.names) ? category.names : [];
+    for (const event of category.events || []) {
+      const row = byEvent.get(String(event.eventId));
+      if (!row) continue;
+      names.forEach((name, index) => {
+        const value = event.stats?.[index];
+        if (value !== undefined) row.stats[name] = Number(String(value).replaceAll(',', ''));
+      });
+    }
+  }
+  return [...byEvent.values()].sort((a, b) => Date.parse(b.gameDate) - Date.parse(a.gameDate)).slice(0, 5);
+}
 async function freeFantasyPlayerSearch(query = '', limit = 80) {
   const players = await freeFantasyPlayers(), needle = normalizeFantasyQuery(query);
   return players.filter(player => !needle || normalizeFantasyQuery(player.name).includes(needle)).sort((a, b) => {
@@ -310,7 +326,8 @@ async function freeFantasyOverview(names = []) {
       if (!response.ok) return { ...player, source: 'Sleeper', available: false };
       const data = await response.json();
       const statLine = extractFantasyStatLine(data.statistics || data.stats || data);
-      return { ...player, source: 'ESPN + Sleeper', available: true, statLine, overview: data.statistics || data.stats || null, nextGame: data.nextGame || null, news: Array.isArray(data.news) ? data.news.slice(0, 3) : [] };
+      const nextEvent = data.nextGame?.league?.events?.[0] || null;
+      return { ...player, source: 'ESPN + Sleeper', available: true, statLine, overview: data.statistics || data.stats || null, nextGame: nextEvent, recentGames: extractFantasyRecentGames(data.gameLog), fantasySummary: data.fantasy || null, news: Array.isArray(data.news) ? data.news.slice(0, 3) : [] };
     } catch { return { ...player, source: 'Sleeper', available: false }; }
   }));
   return { updatedAt: new Date().toISOString(), source: 'Free public data', players: results };
