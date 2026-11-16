@@ -158,31 +158,51 @@ function independentSiteQuery(league) {
   const sites = independentSites[league] || [];
   return sites.length ? '(' + sites.map(site => 'site:' + site).join(' OR ') + ')' : '';
 }
-function parseRss(xml, team, league) {
+function parseRss(xml, team, league, maxAgeDays = 3) {
   const strip = s => String(s).replaceAll('<![CDATA[', '').replaceAll(']]>', '').trim();
-  const cutoff = Date.now() - 3 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000;
   return xml.split('<item>').slice(1).map(part => {
     const b = part.split('</item>')[0];
     const get = t => { const i = b.indexOf('<' + t); if (i < 0) return ''; const openEnd = b.indexOf('>', i), j = b.indexOf('</' + t + '>', openEnd); return openEnd < 0 || j < 0 ? '' : b.slice(openEnd + 1, j); };
     const title = strip(get('title')), description = strip(get('description'));
-    return { team, league, title, description, link: strip(get('link')), source: strip(get('source')) || 'Publisher', sourceType: classifySourceName(strip(get('source')) || 'Publisher'), author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')), feedTypes: classifyArticleTypes(title + ' ' + description) };
+    return { team, league, title, description, link: strip(get('link')), source: strip(get('source')) || 'Publisher', sourceType: classifySourceName(strip(get('source')) || 'Publisher'), author: strip(get('dc:creator') || get('author') || get('creator')), date: strip(get('pubDate')), coverageDays: maxAgeDays, feedTypes: classifyArticleTypes(title + ' ' + description) };
   }).filter(x => { const published = Date.parse(x.date); return x.title && x.link && Number.isFinite(published) && published <= Date.now() && published >= cutoff && isAllowedArticle(x); })
     .sort((a, b) => Date.parse(b.date) - Date.parse(a.date)).slice(0, 20);
 }
-const leagueSearchTerms = { NFL: 'football NFL', NBA: 'basketball NBA', MLB: 'baseball MLB', NHL: 'hockey NHL' }; function articleMatchesTeam(item, team) { const text = normalizedArticleText([item.title, item.description, item.source].filter(Boolean).join(' ')); const nickname = team.split(' ').at(-1).toLowerCase(); const owners = Object.keys(teamLeague).filter(name => name.split(' ').at(-1).toLowerCase() === nickname); const aliases = [normalizedArticleText(team)]; if (owners.length === 1) aliases.push(normalizedArticleText(nickname)); if (!aliases.some(alias => (' ' + text + ' ').includes(' ' + alias + ' '))) return false; const league = teamLeague[team]; const wrongSport = { NFL: /\b(?:basketball|nba|baseball|mlb|hockey|nhl)\b/i, NBA: /\b(?:football|nfl|baseball|mlb|hockey|nhl)\b/i, MLB: /\b(?:football|nfl|basketball|nba|hockey|nhl)\b/i, NHL: /\b(?:football|nfl|basketball|nba|baseball|mlb)\b/i }; return item.league === league && !wrongSport[league]?.test(text); } async function articlesFor(team, feedType = 'latest', sourceFilter = 'all') {
+const leagueSearchTerms = { NFL: 'football NFL', NBA: 'basketball NBA', MLB: 'baseball MLB', NHL: 'hockey NHL' };
+function articleMatchesTeam(item, team) { const text = normalizedArticleText([item.title, item.description, item.source].filter(Boolean).join(' ')); const nickname = team.split(' ').at(-1).toLowerCase(); const owners = Object.keys(teamLeague).filter(name => name.split(' ').at(-1).toLowerCase() === nickname); const aliases = [normalizedArticleText(team)]; if (owners.length === 1) aliases.push(normalizedArticleText(nickname)); if (!aliases.some(alias => (' ' + text + ' ').includes(' ' + alias + ' '))) return false; const league = teamLeague[team]; const wrongSport = { NFL: /\b(?:basketball|nba|baseball|mlb|hockey|nhl)\b/i, NBA: /\b(?:football|nfl|baseball|mlb|hockey|nhl)\b/i, MLB: /\b(?:football|nfl|basketball|nba|hockey|nhl)\b/i, NHL: /\b(?:football|nfl|baseball|mlb)\b/i }; return item.league === league && !wrongSport[league]?.test(text); }
+async function articlesFor(team, feedType = 'latest', sourceFilter = 'all', freshOnly = false) {
   const league = teamLeague[team] || 'National';
+  const windows = freshOnly ? [3] : [3, 7, 14];
+  const sourceMatches = item => sourceFilter === 'all' ||
+    (sourceFilter === 'beat' && item.sourceType === 'Local/Beat') ||
+    (sourceFilter === 'independent' && item.sourceType === 'Independent') ||
+    (sourceFilter === 'national' && item.sourceType === 'National') ||
+    (sourceFilter === 'team' && item.sourceType === 'Team/League');
   if (team === 'National Headlines') {
     const queries = [['NFL', 'NFL football latest news teams coaches players'], ['NBA', 'NBA basketball latest news teams players'], ['MLB', 'MLB baseball latest news teams players'], ['NHL', 'NHL hockey latest news teams players']];
-    const batches = await Promise.all(queries.map(async pair => { try { const base = feedType === 'latest' ? pair[1] : pair[0] + ' ' + leagueSearchTerms[pair[0]] + ' ' + feedSearchPhrase(feedType); const phrase = sourceFilter === 'independent' ? base + ' ' + independentSiteQuery(pair[0]) : base; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(phrase + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0]) : []; } catch { return []; } }));
+    const batches = await Promise.all(queries.map(async pair => { try { const base = feedType === 'latest' ? pair[1] : pair[0] + ' ' + leagueSearchTerms[pair[0]] + ' ' + feedSearchPhrase(feedType); const phrase = sourceFilter === 'independent' ? base + ' ' + independentSiteQuery(pair[0]) : base; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(phrase + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); return r.ok ? parseRss(await r.text(), 'National Headlines', pair[0], 3) : []; } catch { return []; } }));
     const all = batches.flat(), seen = new Set(), varied = all.filter(a => { if (seen.has(a.source)) return false; seen.add(a.source); return true; }), rest = all.filter(a => !varied.includes(a));
     varied.sort((a, b) => Date.parse(b.date) - Date.parse(a.date)); rest.sort((a, b) => Date.parse(b.date) - Date.parse(a.date));
     return [...varied, ...rest].slice(0, 20);
   }
-  try { const sport = leagueSearchTerms[league] || ''; const base = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' '); const query = sourceFilter === 'independent' ? base + ' ' + independentSiteQuery(league) : base; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query + ' when:3d') + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) { const articles = parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); if (articles.length || sourceFilter !== 'independent') return articles; } } catch {}
-  if (sourceFilter === 'independent') {
-    try { const sport = leagueSearchTerms[league] || ''; const query = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' ') + ' when:3d'; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league).filter(item => articleMatchesTeam(item, team)); } catch {}
+  const collected = [], seenLinks = new Set();
+  for (const days of windows) {
+    try {
+      const sport = leagueSearchTerms[league] || '';
+      const base = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' ');
+      const phrase = sourceFilter === 'independent' ? base + ' ' + independentSiteQuery(league) : base;
+      const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(phrase + ' when:' + days + 'd') + '&hl=en-US&gl=US&ceid=US:en');
+      if (r.ok) for (const item of parseRss(await r.text(), team, league, days).filter(item => articleMatchesTeam(item, team) && sourceMatches(item))) {
+        if (!seenLinks.has(item.link)) { seenLinks.add(item.link); collected.push(item); }
+      }
+    } catch {}
+    if (collected.length >= 10) break;
   }
-  return [];
+  if (sourceFilter === 'independent' && !collected.length && !freshOnly) {
+    try { const sport = leagueSearchTerms[league] || ''; const query = [team, sport, feedSearchPhrase(feedType)].filter(Boolean).join(' ') + ' when:14d'; const r = await fetch('https://news.google.com/rss/search?q=' + encodeURIComponent(query) + '&hl=en-US&gl=US&ceid=US:en'); if (r.ok) return parseRss(await r.text(), team, league, 14).filter(item => articleMatchesTeam(item, team) && sourceMatches(item)); } catch {}
+  }
+  return collected.sort((a, b) => Date.parse(b.date) - Date.parse(a.date)).slice(0, 20);
 }
 
 const scoreFeeds = { NFL: ['football', 'nfl'], NBA: ['basketball', 'nba'], MLB: ['baseball', 'mlb'], NHL: ['hockey', 'nhl'] };
@@ -371,8 +391,10 @@ async function handler(req, res) {
     if (!isDiscovery && !account) return send(res, 401, { error: 'Log in to load your selected teams.' });
     const teams = isDiscovery ? ['National Headlines'] : (Array.isArray(account.teams) ? account.teams.filter(team => teamLeague[team]) : []);
     const sourceFilter = ['national', 'beat', 'independent', 'team'].includes(url.searchParams.get('source')) ? url.searchParams.get('source') : 'all';
-    const articles = (await Promise.all(teams.map(team => articlesFor(team, feedType, sourceFilter)))).flat();
-    return send(res, 200, { updatedAt: new Date().toISOString(), articles });
+    const freshOnly = url.searchParams.get('freshOnly') === 'true';
+    const articles = (await Promise.all(teams.map(team => articlesFor(team, feedType, sourceFilter, freshOnly)))).flat();
+    const coverageDays = articles.reduce((max, article) => Math.max(max, Number(article.coverageDays) || 3), 3);
+    return send(res, 200, { updatedAt: new Date().toISOString(), articles, expandedCoverage: !freshOnly && coverageDays > 3, coverageDays });
   }
   if (url.pathname === '/api/saved-stories') {
     const user = await authenticatedUser(req); if (!user) return send(res, 401, { error: 'Log in to sync saved stories across devices.' });
