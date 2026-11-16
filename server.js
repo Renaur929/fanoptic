@@ -260,6 +260,21 @@ async function freeFantasyPlayers() {
   return fantasyPlayerCache.players;
 }
 function normalizeFantasyQuery(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+const espnIdCache = new Map();
+async function resolveEspnId(name) {
+  const key = normalizeFantasyQuery(name);
+  if (espnIdCache.has(key)) return espnIdCache.get(key);
+  try {
+    const response = await fetch('https://site.api.espn.com/apis/search/v2?query=' + encodeURIComponent(name) + '&limit=5');
+    if (!response.ok) return '';
+    const data = await response.json();
+    const contents = (data.results || []).find(result => result.type === 'player')?.contents || [];
+    const exact = contents.find(item => normalizeFantasyQuery(item.displayName) === key) || contents[0];
+    const id = String(exact?.uid || '').match(/a:(\d+)/)?.[1] || '';
+    espnIdCache.set(key, id);
+    return id;
+  } catch { espnIdCache.set(key, ''); return ''; }
+}
 function extractFantasyStatLine(value, output = {}) {
   const aliases = {
     passingYards: ['passingyards', 'passyards'], passingTDs: ['passingtouchdowns', 'passingtds', 'passtd'], interceptions: ['interceptions', 'interceptions thrown'],
@@ -267,9 +282,13 @@ function extractFantasyStatLine(value, output = {}) {
     receptions: ['receptions', 'rec'], receivingYards: ['receivingyards', 'recyards'], receivingTDs: ['receivingtouchdowns', 'receivingtds', 'rectd'],
     fumblesLost: ['fumbleslost'], twoPointConversions: ['twopointconversions', '2ptconversions']
   };
-  const assign = (key, raw) => { const normalized = normalizeFantasyQuery(key); const number = Number(raw); if (!Number.isFinite(number)) return; for (const [target, names] of Object.entries(aliases)) if (names.some(name => normalized.includes(name))) output[target] = number; };
+  const assign = (key, raw) => { const normalized = normalizeFantasyQuery(key); const number = Number(String(raw).replaceAll(',', '')); if (!Number.isFinite(number)) return; for (const [target, names] of Object.entries(aliases)) if (names.some(name => normalized.includes(name))) output[target] = number; };
   if (Array.isArray(value)) { for (const item of value) extractFantasyStatLine(item, output); return output; }
   if (!value || typeof value !== 'object') return output;
+  if (Array.isArray(value.names) && Array.isArray(value.splits)) {
+    const split = value.splits.find(item => /regular season|last 5 games/i.test(item.displayName || '')) || value.splits[0];
+    if (split && Array.isArray(split.stats)) value.names.forEach((name, index) => assign(name, split.stats[index]));
+  }
   if (value.name && value.value != null) assign(value.name, value.value);
   if (value.label && value.value != null) assign(value.label, value.value);
   for (const [key, child] of Object.entries(value)) { if (typeof child === 'number' || typeof child === 'string') assign(key, child); else if (child && typeof child === 'object') extractFantasyStatLine(child, output); }
@@ -281,7 +300,7 @@ async function freeFantasyPlayerSearch(query = '', limit = 80) {
 }
 async function freeFantasyOverview(names = []) {
   const players = await freeFantasyPlayers(), wanted = new Set(names.map(normalizeFantasyQuery));
-  const matches = players.filter(player => wanted.has(normalizeFantasyQuery(player.name)) && player.espnId).slice(0, 30);
+  const matches = (await Promise.all(players.filter(player => wanted.has(normalizeFantasyQuery(player.name))).slice(0, 30).map(async player => ({ ...player, espnId: player.espnId || await resolveEspnId(player.name) })))).filter(player => player.espnId);
   const results = await Promise.all(matches.map(async player => {
     try {
       const response = await fetch('https://site.web.api.espn.com/apis/common/v3/sports/football/nfl/athletes/' + encodeURIComponent(player.espnId) + '/overview');
