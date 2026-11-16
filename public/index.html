@@ -316,3 +316,12 @@ function renderGame(g,index){const final=g.phase==='FINAL',live=Boolean(g.live),
 function renderScores(){const previous=captureFlaps();document.querySelectorAll('.scoreMode').forEach(b=>b.classList.toggle('ghost',b.dataset.scoremode!==scoreMode));const all=scoreMode==='today'?scoreGames:weekGames,games=all.filter(g=>(scoreLeague==='All'||g.league===scoreLeague)&&(!scoreQuery||((g.away+' '+g.home+' '+g.league).toLowerCase().includes(scoreQuery)))).sort((a,b)=>{const rank=g=>g.favorite?(g.live?0:g.phase==='SCHEDULED'?1:4):(g.live?2:g.phase==='SCHEDULED'?3:5);return rank(a)-rank(b)||Number(a.timestamp)-Number(b.timestamp)}),pages=Math.max(1,Math.ceil(games.length/3));scorePage=Math.min(scorePage,pages-1);const page=games.slice(scorePage*3,scorePage*3+3);$('scoreTitle').textContent=scoreMode==='today'?"TODAY'S GAMES":'THIS WEEK';$('scorePageLabel').textContent=(scorePage+1)+' / '+pages;$('scores').innerHTML=page.length?'<div class="scoreboard">'+page.map((g,i)=>renderGame(g,i)).join('')+'</div>':'<div class="card">No games scheduled right now.</div>';animateFlaps(previous);$('scorePrev').disabled=scorePage===0;$('scoreNext').disabled=scorePage>=pages-1}
 $('scorePrev').onclick=()=>{if(scorePage>0){scorePage--;renderScores()}};$('scoreNext').onclick=()=>{const all=scoreMode==='today'?scoreGames:weekGames,games=all.filter(g=>(scoreLeague==='All'||g.league===scoreLeague)&&(!scoreQuery||((g.away+' '+g.home+' '+g.league).toLowerCase().includes(scoreQuery)))),pages=Math.ceil(games.length/3);if(scorePage<pages-1){scorePage++;renderScores()}};renderScores();
 </script>
+<script>
+  const edgeLink=document.createElement('a');
+  edgeLink.href='/fantasy.html';
+  edgeLink.textContent='Fantasy Edge';
+  edgeLink.className='btn ghost';
+  edgeLink.style.textDecoration='none';
+  edgeLink.style.display='inline-block';
+  document.querySelector('#authActions')?.prepend(edgeLink);
+</script>
