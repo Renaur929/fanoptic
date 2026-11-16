@@ -133,7 +133,10 @@ function renderFeaturedWriters(articles = []) {
     const list = profilesByTeam.get(profile.team);
     if (list.length < 3) list.push(profile);
   }
-  const teamOrder = feedMode === 'myTeams' ? teams : [...new Set(articles.map(article => article.team).filter(Boolean))];
+  const teamOrder = feedMode === 'myTeams' ? teams : [...new Set([
+    ...curatedProfiles.map(profile => profile.team),
+    ...articles.map(article => article.team).filter(Boolean)
+  ])];
   const orderedTeams = teamOrder;
   const renderProfile = profile => {
     const url = validExternalUrl(profile.profileUrl), photo = validExternalUrl(profile.photoUrl);
